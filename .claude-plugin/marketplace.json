@@ -1,0 +1,6 @@
+{
+  "name": "session-state",
+  "owner": { "name": "Isaac Kargar" },
+  "description": "Notes of what you asked and decided in a long Claude Code chat, in a file the agent can read.",
+  "plugins": [{ "name": "session-state", "source": "./" }]
+}

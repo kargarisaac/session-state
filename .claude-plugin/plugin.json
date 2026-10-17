@@ -1,0 +1,72 @@
+{
+  "name": "session-state",
+  "version": "0.1.0",
+  "description": "Keeps short notes of what you asked and decided in a long chat, in a session.md the agent can read, with a side panel.",
+  "author": { "name": "Isaac Kargar" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "openrouterKey": {
+      "type": "string",
+      "title": "OpenRouter API key",
+      "description": "Used for the Jev gate. Leave empty to use the OPENROUTER_API_KEY environment variable.",
+      "sensitive": true,
+      "required": false
+    },
+    "gate": {
+      "type": "string",
+      "title": "Gate",
+      "description": "jev: ask Jev (OpenRouter) first; off: Haiku reads every turn and nothing leaves Claude Code.",
+      "options": ["jev", "off"],
+      "default": "jev"
+    },
+    "threshold": {
+      "type": "number",
+      "title": "Gate threshold",
+      "description": "A turn goes to Haiku when Jev's probability is at least this. 0.7 keeps about 94% of saved notes on target and finds about half of the important turns; lower is noisier, higher misses more.",
+      "default": 0.7,
+      "min": 0,
+      "max": 1
+    },
+    "jevModel": {
+      "type": "string",
+      "title": "Jev model",
+      "description": "OpenRouter decision model id, e.g. jev-1.13 or jev-1.14.",
+      "default": "jev-1.13"
+    },
+    "haikuModel": {
+      "type": "string",
+      "title": "Extractor model",
+      "description": "The Claude model that writes the notes, run on your Claude Code login.",
+      "default": "claude-haiku-5-5"
+    },
+    "effort": {
+      "type": "string",
+      "title": "Extractor effort",
+      "description": "How hard the extractor thinks.",
+      "options": ["low", "medium", "high", "xhigh", "max"],
+      "default": "high"
+    },
+    "maxWords": {
+      "type": "number",
+      "title": "Words per note",
+      "description": "Longest allowed note.",
+      "default": 15,
+      "min": 5,
+      "max": 40
+    },
+    "auditRate": {
+      "type": "number",
+      "title": "Audit rate",
+      "description": "Share of turns the gate skips that Haiku reads anyway, to measure what the gate misses. 0 turns it off.",
+      "default": 0,
+      "min": 0,
+      "max": 1
+    },
+    "openPanelOnStart": {
+      "type": "boolean",
+      "title": "Open the panel at session start",
+      "description": "Open the notes panel when a session starts.",
+      "default": false
+    }
+  }
+}
