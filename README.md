@@ -38,7 +38,13 @@ The notes live in `~/.claude/session-state/<project>/<date>_<id8>.md`, with an `
 
 ## How it works
 
+![Flow of the mod: turn, Jev gate, Haiku, code checks, session.md, side panel, and the system-prompt line](docs/flow.png)
+
 Per turn, tool calls are dropped. **Jev** (a yes/no decision model on OpenRouter) gates the turn; **Haiku 5.5 at high effort**, run on your Claude Code login (plan usage, not billed), writes the notes. Only what you said becomes a note, at most 15 words each, and a new note strikes through the one it replaces. Code checks every note against your message before it is saved.
+
+**What the agent is told.** One fixed line is added to the system prompt, the same text on every request, so it costs one cache write:
+
+> Session notes: a tool keeps short notes of what the user asked and decided in this conversation at `<path to session.md>`. The file may not exist until the first note is saved. Lines are in the order the user said things, oldest first; a later line overrides an earlier one, and struck-through (~~) lines are history. Read it with the Read tool when you need to recall what the user asked or decided, after a compaction, or when you are unsure which decision is current. Do not edit it; it is maintained automatically.
 
 ## Settings
 
