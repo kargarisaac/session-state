@@ -1,28 +1,33 @@
 {
   "name": "session-state",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Keeps short notes of what you asked and decided in a long chat, in a session.md the agent can read, with a side panel.",
-  "author": { "name": "Isaac Kargar" },
+  "author": {
+    "name": "Isaac Kargar"
+  },
   "types": "./types/index.d.ts",
   "userConfig": {
     "openrouterKey": {
       "type": "string",
       "title": "OpenRouter API key",
-      "description": "Used for the Jev gate. Leave empty to use the OPENROUTER_API_KEY environment variable.",
+      "description": "Used for the Jev gate. Leave empty to use the OPENROUTER_API_KEY environment variable. Default: empty.",
       "sensitive": true,
       "required": false
     },
     "gate": {
       "type": "string",
       "title": "Gate",
-      "description": "jev: ask Jev (OpenRouter) first; off: Haiku reads every turn and nothing leaves Claude Code.",
-      "options": ["jev", "off"],
+      "description": "jev: ask Jev (OpenRouter) first; off: Haiku reads every turn and nothing leaves Claude Code. Default: jev.",
+      "options": [
+        "jev",
+        "off"
+      ],
       "default": "jev"
     },
     "threshold": {
       "type": "number",
       "title": "Gate threshold",
-      "description": "A turn goes to Haiku when Jev's probability is at least this. 0.7 keeps about 94% of saved notes on target and finds about half of the important turns; lower is noisier, higher misses more.",
+      "description": "A turn goes to Haiku when Jev's probability is at least this. 0.7 keeps about 94% of saved notes on target and finds about half of the important turns; lower is noisier, higher misses more. Default: 0.7.",
       "default": 0.7,
       "min": 0,
       "max": 1
@@ -30,26 +35,32 @@
     "jevModel": {
       "type": "string",
       "title": "Jev model",
-      "description": "OpenRouter decision model id, e.g. jev-1.13 or jev-1.14.",
+      "description": "OpenRouter decision model id, e.g. jev-1.13 or jev-1.14. Default: jev-1.13 (the one the threshold was calibrated on). Empty means the default.",
       "default": "jev-1.13"
     },
     "haikuModel": {
       "type": "string",
       "title": "Extractor model",
-      "description": "The Claude model that writes the notes, run on your Claude Code login.",
+      "description": "The Claude model that writes the notes, run on your Claude Code login. Default: claude-haiku-5-5. Empty means the default.",
       "default": "claude-haiku-5-5"
     },
     "effort": {
       "type": "string",
       "title": "Extractor effort",
-      "description": "How hard the extractor thinks.",
-      "options": ["low", "medium", "high", "xhigh", "max"],
+      "description": "How hard the extractor thinks. Default: high.",
+      "options": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
       "default": "high"
     },
     "maxWords": {
       "type": "number",
       "title": "Words per note",
-      "description": "Longest allowed note.",
+      "description": "Longest allowed note. Default: 15. Empty means the default.",
       "default": 15,
       "min": 5,
       "max": 40
@@ -57,7 +68,7 @@
     "auditRate": {
       "type": "number",
       "title": "Audit rate",
-      "description": "Share of turns the gate skips that Haiku reads anyway, to measure what the gate misses. 0 turns it off.",
+      "description": "Share of turns the gate skips that Haiku reads anyway, to measure what the gate misses. 0 turns it off. Default: 0. Empty means the default.",
       "default": 0,
       "min": 0,
       "max": 1
@@ -65,7 +76,7 @@
     "openPanelOnStart": {
       "type": "boolean",
       "title": "Open the panel at session start",
-      "description": "Open the notes panel when a session starts.",
+      "description": "Open the notes panel when a session starts. Default: off.",
       "default": false
     }
   }
