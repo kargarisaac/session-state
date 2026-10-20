@@ -419,7 +419,8 @@ export const register: Register = (on, options) => {
 
     if (shown === 'ledger') {
       const isHistory = await read($, isHistoryShown)
-      const text = isHistory ? await readText($, historyOf(folder)) : await read($, md)
+      // The front matter is for tools and the agent; the panel shows the ledger itself.
+      const text = (isHistory ? await readText($, historyOf(folder)) : await read($, md)).replace(/^---\n[\s\S]*?\n---\n?/, '')
       return (
         <Box flexDirection="column">
           {tabs}

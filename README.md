@@ -26,10 +26,24 @@ No OpenRouter key? Set the `gate` setting to `off` (see Privacy).
 
 Work as usual. Then:
 
-- `/session-state` opens the side panel with three tabs: **Steps** (one line per turn), **Ledger** (`state.md`, with a button for `history.md`) and **Stats** (models, counts, cost).
+- `/session-state` opens one side panel with three tab buttons at the top: **Steps** (one line per turn), **Ledger** (`state.md`, with a button for `history.md`) and **Stats** (models, counts, cost).
 - `/session-state steps | ledger | stats` opens the panel on that tab.
 - `/session-state close | pause | resume | retry | path | digest` closes the panel, stops recording, resumes, re-runs failed turns, prints the folder, or prints what the agent gets after a compaction.
 - Ask the agent "what did I decide about X?" and it reads the ledger.
+
+**Steps:** one line per turn, with what the tools did and what the turn added (`+M-002`) or finished (`done M-002`).
+
+![Steps tab: one line per turn](docs/panel-steps.png)
+
+**Ledger:** `state.md` as it stands: open asks, decisions and rules with why and your words, learnings, and the files that matter.
+
+![Ledger tab: notes, learnings and files](docs/panel-ledger.png)
+
+**Stats:** the gate's decision for each turn, how many turns got a summary or an extraction, and the cost.
+
+![Stats tab: models, counts, cost and gate decisions](docs/panel-stats.png)
+
+These come from a 7-turn demo chat. In turn 4 the user answered "the first one" (pytest); Jev scored that short reply 0.32, so it got a step but no note.
 
 Each chat gets a folder, `~/.claude/session-state/<project>/<date>_<id8>/`, with an `INDEX.md` per project:
 

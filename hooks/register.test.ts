@@ -120,6 +120,11 @@ test('a decision above the gate lands in the session folder: state, step, archiv
 
   const ui = await mountPane($)
   expect(await textOf(ui)).toContain('t1 · ✓ · Switched storage to SQLite.')
+  await $.command.run({ command: 'session-state', args: 'ledger' } as never)
+  await ui.redraw()
+  const ledger = JSON.stringify(await ui.findAll({ type: 'Markdown' } as never))
+  expect(ledger).toContain('Use SQLite for storage.')
+  expect(ledger.includes('session_id:')).toBe(false)
   await $.command.run({ command: 'session-state', args: 'stats' } as never)
   await ui.redraw()
   const stats = await textOf(ui)
