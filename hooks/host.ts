@@ -37,7 +37,7 @@ export function hostOf($: EngineInterface, config: Config): Host {
         effort: effort ?? config.effort,
         system,
         prompt,
-        maxTokens: 1500,
+        maxTokens: 4000,
         timeoutMs: 90_000,
       })
       const usage = {

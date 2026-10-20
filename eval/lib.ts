@@ -2,7 +2,10 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-export type EvalTurn = { n: number; user: string; answer: string; previousAnswer: string }
+import { addToolCall, emptyFacts } from '../core/facts'
+import type { TurnFacts } from '../core/types'
+
+export type EvalTurn = { n: number; user: string; answer: string; previousAnswer: string; facts?: TurnFacts }
 export type EvalSession = { id: string; project: string; turns: EvalTurn[] }
 
 export const DATA = join(import.meta.dir, 'data')
@@ -48,8 +51,35 @@ const assistantText = (d: Record<string, unknown>): string | undefined => {
   return text.trim() === '' ? undefined : text
 }
 
+type ToolUse = { id: string; name: string; input: Record<string, unknown> }
+
+const blocks = (d: Record<string, unknown>): Record<string, unknown>[] => {
+  const content = (d.message as { content?: unknown } | undefined)?.content
+  return Array.isArray(content) ? (content as Record<string, unknown>[]) : []
+}
+
+const resultText = (content: unknown): string =>
+  typeof content === 'string'
+    ? content
+    : Array.isArray(content)
+      ? content.map(b => (typeof (b as { text?: unknown }).text === 'string' ? (b as { text: string }).text : '')).join('\n')
+      : ''
+
+// The main agent's tool calls in a turn, folded the way the mod folds them live.
+const addTools = (d: Record<string, unknown>, uses: Map<string, ToolUse>, turn: EvalTurn | undefined): void => {
+  if (d.isSidechain === true || turn === undefined) return
+  for (const b of blocks(d)) {
+    if (d.type === 'assistant' && b.type === 'tool_use') uses.set(String(b.id), { id: String(b.id), name: String(b.name), input: (b.input ?? {}) as Record<string, unknown> })
+    if (d.type === 'user' && b.type === 'tool_result') {
+      const use = uses.get(String(b.tool_use_id))
+      if (use !== undefined) turn.facts = addToolCall(turn.facts ?? emptyFacts(), { tool: use.name, input: use.input, isError: b.is_error === true, text: resultText(b.content) })
+    }
+  }
+}
+
 export const readSession = (file: string, project: string): EvalSession => {
   const turns: EvalTurn[] = []
+  const uses = new Map<string, ToolUse>()
   for (const line of readFileSync(file, 'utf8').split('\n')) {
     if (line === '') continue
     let d: Record<string, unknown>
@@ -60,9 +90,10 @@ export const readSession = (file: string, project: string): EvalSession => {
     }
     const user = humanText(d)
     if (user !== undefined) {
-      turns.push({ n: turns.length + 1, user, answer: '', previousAnswer: turns.at(-1)?.answer ?? '' })
+      turns.push({ n: turns.length + 1, user, answer: '', previousAnswer: turns.at(-1)?.answer ?? '', facts: emptyFacts() })
       continue
     }
+    addTools(d, uses, turns.at(-1))
     const answer = assistantText(d)
     const last = turns.at(-1)
     if (answer !== undefined && last !== undefined) last.answer = answer
@@ -92,9 +123,9 @@ export const scoreFile = (model: string, view: 'prev' | 'none'): string => {
 export const clipText = (s: string, max: number): string => (s.length <= max ? s : `${s.slice(0, max)} [...]`)
 
 // One headless call on the Claude Code login (the subscription): no tools, no session saved.
-export const ask = async (model: string, system: string, prompt: string): Promise<string> => {
+export const ask = async (model: string, system: string, prompt: string, effort = 'high'): Promise<string> => {
   const proc = Bun.spawn(
-    ['claude', '-p', '--model', model, '--effort', 'high', '--output-format', 'json', '--no-session-persistence', '--tools', '', '--disable-slash-commands', '--strict-mcp-config', '--system-prompt', system],
+    ['claude', '-p', '--model', model, '--effort', effort, '--output-format', 'json', '--no-session-persistence', '--tools', '', '--disable-slash-commands', '--strict-mcp-config', '--system-prompt', system],
     { cwd: '/tmp', stdin: new Blob([prompt]), stdout: 'pipe', stderr: 'pipe' },
   )
   const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited])
