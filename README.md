@@ -29,6 +29,7 @@ Work as usual. Then:
 - `/session-state` opens one side panel with three tab buttons at the top: **Steps** (one line per turn), **Ledger** (`state.md`, with a button for `history.md`) and **Stats** (models, counts, cost).
 - `/session-state steps | ledger | stats` opens the panel on that tab.
 - `/session-state close | pause | resume | retry | path | digest` closes the panel, stops recording, resumes, re-runs failed turns, prints the folder, or prints what the agent gets after a compaction.
+- `/session-state rebuild` moves the chat's ledger files to `before-rebuild/` and reads the whole chat again from Claude Code's transcript.
 - Ask the agent "what did I decide about X?" and it reads the ledger.
 
 **Steps:** one line per turn, with what the tools did and what the turn added (`+M-002`) or finished (`done M-002`).
@@ -65,7 +66,7 @@ Quote: "Folder, split files"
 Source: t41 · turn 3f2a9c1b · answers t40
 ```
 
-A chat started with an older version (one `<date>_<id8>.md` file) seeds its new folder once from that file's active notes. The old file is left as it was.
+A chat the mod meets part-way (installed or upgraded mid-chat, or resumed) is read back from Claude Code's transcript: its last 100 turns are queued like live ones, so each gets a step line and its notes in the background, with the right turn numbers. Only when there is no transcript does a notes file from an older version (`<date>_<id8>.md`) seed the folder. Old files are left as they were.
 
 ## How it works
 
@@ -85,7 +86,7 @@ flowchart LR
   L --> UI[Side panel]
 ```
 
-**Every turn** the mod records what the main agent's tools did (files read and edited, commands that failed, commits) and archives the turn. **Jev** (a yes/no decision model on OpenRouter) reads your message, the agent's reply and the end of the previous reply, and decides whether you said something that will still matter 50 turns later. Then one **Haiku** call runs on your Claude Code login (plan usage, not billed):
+**Every turn** the mod takes what you typed, including messages sent while the agent was working and your answers to its multiple-choice questions. It records what the main agent's tools did (files read and edited, commands that failed, commits) and archives the turn. **Jev** (a yes/no decision model on OpenRouter) reads your message, the agent's reply and the end of the previous reply, and decides whether you said something that will still matter 50 turns later. Then one **Haiku** call runs on your Claude Code login (plan usage, not billed):
 
 - **Summarization**, every turn, at low effort: the step line, which open asks the reply finished, a role for each newly edited file, and any learning (an approach that failed, or a hard limit), quoted from the reply or a failed command.
 - **Extraction**, when Jev says yes (or Jev is off or down), at the set effort: all of the above, plus notes about what you said: decisions, rules, preferences, corrections and asks. Each note has a short title, why, context, your exact words and its source turn. If your message only makes sense with an older turn ("do what I said about the deck"), Haiku may ask for that turn once from the archive.

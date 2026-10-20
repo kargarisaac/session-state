@@ -13,6 +13,7 @@ import type { Ledger } from './pipeline'
 import { clip, redact } from './redact'
 import { applyFileRoles, applyLearnings, emptyState, historyBlock, parseState, renderState, seedState } from './state'
 import { appendStep, stepLine, stepLines } from './steps'
+import { parseTranscript } from './transcript'
 import { DEFAULTS } from './types'
 import type { CompleteResult, Config, Host, Memory, State, Turn, TurnFacts } from './types'
 
@@ -474,4 +475,30 @@ test('the index keeps one row per session folder, newest first', async () => {
   expect(rows[0]).toContain('bbbb2222')
   expect(rows[1]).toContain('5 notes, 0 learned, 4 turns')
   expect(md.includes('New | pipe')).toBe(false)
+})
+
+const line = (o: object) => JSON.stringify(o)
+const TRANSCRIPT = [
+  line({ type: 'user', uuid: 'u1', message: { content: 'Use SQLite.' } }),
+  line({ type: 'assistant', message: { content: [{ type: 'text', text: 'Checking.' }, { type: 'tool_use', id: 'k1', name: 'AskUserQuestion', input: {} }] } }),
+  line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'k1', content: 'Your questions have been answered: "Which file?"="db.ts". You can now continue.' }] }, toolUseResult: { answers: { 'Which file?': 'db.ts' } } }),
+  line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'k1', content: 'Your questions have been answered: "Which file?"="db.ts".' }] } }),
+  line({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'k2', name: 'Edit', input: { file_path: '/work/demo/db.ts' } }] } }),
+  line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'k2', content: 'ok' }] } }),
+  line({ type: 'attachment', attachment: { type: 'queued_command', prompt: 'and keep it local' } }),
+  line({ type: 'assistant', message: { content: [{ type: 'text', text: 'Switched to SQLite.' }] } }),
+  line({ type: 'user', isMeta: true, message: { content: '<system-reminder>x</system-reminder>' } }),
+  line({ type: 'user', message: { content: '<command-name>/clear</command-name>' } }),
+  line({ type: 'user', uuid: 'u2', message: { content: [{ type: 'image', source: {} }, { type: 'text', text: 'what is this?' }] } }),
+  line({ type: 'assistant', isSidechain: true, message: { content: [{ type: 'text', text: 'subagent' }] } }),
+  'not json',
+].join('\n')
+
+test('a transcript reads back as typed turns with the last reply, tool facts and question answers', () => {
+  const [first, second, ...rest] = parseTranscript(TRANSCRIPT)
+  expect(rest).toEqual([])
+  expect(first).toMatchObject({ turn: 1, turnId: 'u1', answer: 'Switched to SQLite.', previousAnswer: '' })
+  expect(first!.user).toBe("Use SQLite.\n\n[Answers to the agent's questions]\n- Which file? → db.ts\n\nand keep it local")
+  expect(first!.facts.edited).toEqual(['/work/demo/db.ts'])
+  expect(second).toMatchObject({ turn: 2, turnId: 'u2', user: 'what is this?', answer: '', previousAnswer: 'Switched to SQLite.' })
 })

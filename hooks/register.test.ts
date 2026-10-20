@@ -40,7 +40,12 @@ const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = (
   })
   on('turn.start', (_$, e) => ({ turnId: e.turnId }) as never)
   on('turn.complete', () => ({ text: '' }) as never)
-  on('tool.call', (_$, e) => ((e as { tool: string }).tool === 'Bash' ? { isError: true, result: 'x', text: 'Error: exit 1\nENOENT: no such file' } : { result: 'ok', text: 'ok' }) as never)
+  on('tool.call', (_$, e) => {
+    const tool = (e as { tool: string }).tool
+    if (tool === 'Bash') return { isError: true, result: 'x', text: 'Error: exit 1\nENOENT: no such file' } as never
+    if (tool === 'AskUserQuestion') return { result: 'Your questions have been answered: "Which store?"="SQLite, the file one". You can now continue.' } as never
+    return { result: 'ok', text: 'ok' } as never
+  })
   on('session.compact', () => ({ messages: [{ role: 'user', text: 'summary', toolUses: [] }] }) as never)
   on('prompt.compose', () => ({ sections: [] }) as never)
   on('ui.render', () => ({ type: 'Box', props: {}, children: [] }) as never)
@@ -263,4 +268,70 @@ test('entering a worktree mid-chat does not change the project, folder or transc
   expect(md).toContain('project: demo')
   expect(md).toContain('cwd: /work/demo\n')
   expect(md).toContain('/.claude/projects/-work-demo/')
+})
+
+const TRANSCRIPT = `/h/.claude/projects/-work-demo/${ID}.jsonl`
+const typed = (uuid: string, text: string) => JSON.stringify({ type: 'user', uuid, message: { content: text } })
+const replied = (text: string) => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } })
+
+test('a chat met mid-way is read back from its transcript, so steps and turn numbers start at the beginning', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, calls } = world(on, 0.1, [
+    { title: 'Storage', step: { text: 'Chose SQLite.', outcome: 'ok' }, memories: [] },
+    { step: { text: 'Ran the tests.', outcome: 'ok' }, memories: [] },
+    { step: { text: 'Wrote the docs.', outcome: 'ok' }, memories: [] },
+  ])
+  files.set(TRANSCRIPT, [typed('u1', 'pick a store'), replied('SQLite.'), typed('u2', 'run the tests'), replied('All pass.'), typed('u3', 'still typing')].join('\n'))
+  files.set(`${ROOT}/demo/2026-10-16_abc12345.md`, '---\nsession_id: x\nnext_id: 2\n---\n# Old\n- M-001 · t1 · ask · Pick a store.\n')
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t2'))
+  await say($, 'write the docs', 'Done.', 3)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t3'))
+
+  const lines = (files.get(STEPS) ?? '').split('\n').filter(l => l.startsWith('- t'))
+  expect(lines.map(l => l.split(' · ')[0])).toEqual(['- t1', '- t2', '- t3'])
+  expect(lines[0]).toContain('Chose SQLite.')
+  expect(files.get(STATE) ?? '').toContain('# Storage')
+  expect((files.get(STATE) ?? '').includes('Pick a store.')).toBe(false)
+  expect(files.get(EVENTS) ?? '').toContain('"turnId":"u2"')
+  expect((files.get(EVENTS) ?? '').includes('still typing')).toBe(false)
+  expect(calls.haiku).toBe(3)
+})
+
+test('what the user picks in the agent\'s questions counts as their words', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const note = { step: { text: 'Chose the store.', outcome: 'ok' }, memories: [{ kind: 'decision', text: 'Use SQLite for storage.', why: '', context: '', quote: 'SQLite, the file one', refers_to: [], supersedes: [] }] }
+  const { files } = world(on, 0.95, [note])
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await $.prompt.submit({ text: 'set up storage' } as never)
+  await $.turn.start({ text: 'set up storage', turnId: 't1' } as never)
+  await $.tool.call({ tool: 'AskUserQuestion', questions: [], tool_use_id: 'q1' } as never)
+  await $.turn.complete({ turnId: 't1', answer: 'Using SQLite.', durationMs: 10, isAborted: false } as never)
+  await settle(clock, files, f => f.has(STEPS))
+
+  expect(files.get(STATE) ?? '').toContain('Quote: "SQLite, the file one"')
+  expect(files.get(EVENTS) ?? '').toContain('Which store? → SQLite, the file one')
+})
+
+test('rebuild sets the current files aside and reads the whole chat back from the transcript', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.1, [
+    { step: { text: 'Live turn seen late.', outcome: 'ok' }, memories: [] },
+    { step: { text: 'Chose SQLite.', outcome: 'ok' }, memories: [] },
+    { step: { text: 'Ran the tests.', outcome: 'ok' }, memories: [] },
+  ])
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'run the tests', 'All pass.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  files.set(TRANSCRIPT, [typed('u1', 'pick a store'), replied('SQLite.'), typed('u2', 'run the tests'), replied('All pass.')].join('\n'))
+
+  const out = await $.command.run({ command: 'session-state', args: 'rebuild' } as never)
+  expect(JSON.stringify(out)).toContain('2 turns queued')
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t2'))
+
+  const lines = (files.get(STEPS) ?? '').split('\n').filter(l => l.startsWith('- t'))
+  expect(lines).toEqual(['- t1 · ✓ · Chose SQLite.', '- t2 · ✓ · Ran the tests.'])
+  expect(files.get(`${FOLDER}/before-rebuild/steps.md`) ?? '').toContain('Live turn seen late.')
 })

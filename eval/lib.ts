@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-import { addToolCall, emptyFacts } from '../core/facts'
+import { parseTranscript } from '../core/transcript'
 import type { TurnFacts } from '../core/types'
 
 export type EvalTurn = { n: number; user: string; answer: string; previousAnswer: string; facts?: TurnFacts }
@@ -25,79 +25,8 @@ const PROJECTS = join(homedir(), '.claude', 'projects')
 const PREFIX = process.env.EVAL_PROJECT_PREFIX ?? ''
 const isWanted = (dir: string): boolean => dir.startsWith(PREFIX) && !/worktrees|scratchpad/.test(dir)
 
-const AUTOMATED = /^(<command-name>|<local-command-|<system-reminder>|Caveat:|\[Request interrupted|This session is being continued|<task-notification>|<bash-)/
-
-const humanText = (d: Record<string, unknown>): string | undefined => {
-  if (d.type !== 'user' || d.isMeta === true || d.isSidechain === true || d.isCompactSummary === true) return undefined
-  const content = (d.message as { content?: unknown } | undefined)?.content
-  const text =
-    typeof content === 'string'
-      ? content
-      : Array.isArray(content) && content.every(b => (b as { type?: string }).type === 'text')
-        ? content.map(b => (b as { text: string }).text).join('\n')
-        : undefined
-  if (text === undefined || text.trim() === '' || AUTOMATED.test(text.trim())) return undefined
-  return text
-}
-
-const assistantText = (d: Record<string, unknown>): string | undefined => {
-  if (d.type !== 'assistant' || d.isSidechain === true) return undefined
-  const content = (d.message as { content?: unknown } | undefined)?.content
-  if (!Array.isArray(content)) return undefined
-  const text = content
-    .filter(b => (b as { type?: string }).type === 'text')
-    .map(b => (b as { text: string }).text)
-    .join('\n')
-  return text.trim() === '' ? undefined : text
-}
-
-type ToolUse = { id: string; name: string; input: Record<string, unknown> }
-
-const blocks = (d: Record<string, unknown>): Record<string, unknown>[] => {
-  const content = (d.message as { content?: unknown } | undefined)?.content
-  return Array.isArray(content) ? (content as Record<string, unknown>[]) : []
-}
-
-const resultText = (content: unknown): string =>
-  typeof content === 'string'
-    ? content
-    : Array.isArray(content)
-      ? content.map(b => (typeof (b as { text?: unknown }).text === 'string' ? (b as { text: string }).text : '')).join('\n')
-      : ''
-
-// The main agent's tool calls in a turn, folded the way the mod folds them live.
-const addTools = (d: Record<string, unknown>, uses: Map<string, ToolUse>, turn: EvalTurn | undefined): void => {
-  if (d.isSidechain === true || turn === undefined) return
-  for (const b of blocks(d)) {
-    if (d.type === 'assistant' && b.type === 'tool_use') uses.set(String(b.id), { id: String(b.id), name: String(b.name), input: (b.input ?? {}) as Record<string, unknown> })
-    if (d.type === 'user' && b.type === 'tool_result') {
-      const use = uses.get(String(b.tool_use_id))
-      if (use !== undefined) turn.facts = addToolCall(turn.facts ?? emptyFacts(), { tool: use.name, input: use.input, isError: b.is_error === true, text: resultText(b.content) })
-    }
-  }
-}
-
 export const readSession = (file: string, project: string): EvalSession => {
-  const turns: EvalTurn[] = []
-  const uses = new Map<string, ToolUse>()
-  for (const line of readFileSync(file, 'utf8').split('\n')) {
-    if (line === '') continue
-    let d: Record<string, unknown>
-    try {
-      d = JSON.parse(line)
-    } catch {
-      continue
-    }
-    const user = humanText(d)
-    if (user !== undefined) {
-      turns.push({ n: turns.length + 1, user, answer: '', previousAnswer: turns.at(-1)?.answer ?? '', facts: emptyFacts() })
-      continue
-    }
-    addTools(d, uses, turns.at(-1))
-    const answer = assistantText(d)
-    const last = turns.at(-1)
-    if (answer !== undefined && last !== undefined) last.answer = answer
-  }
+  const turns = parseTranscript(readFileSync(file, 'utf8')).map(t => ({ n: t.turn, user: t.user, answer: t.answer, previousAnswer: t.previousAnswer, facts: t.facts }))
   const id = file.slice(file.lastIndexOf('/') + 1).replace(/\.jsonl$/, '')
   return { id, project, turns }
 }

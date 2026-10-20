@@ -9,6 +9,7 @@ import { activeNotes, newFront, parseOldNotes, pointerText, rulesText, upsertInd
 import { processTurn } from '../core/pipeline'
 import { emptyState, HISTORY_HEAD, historyBlock, parseState, renderState, seedState } from '../core/state'
 import { appendStep, stepLines } from '../core/steps'
+import { answersOf, parseTranscript, withAnswers } from '../core/transcript'
 import type { Config, State } from '../core/types'
 import type { LedgerEvent, PendingTurn, Status, Tab } from '../types'
 import { gateLines, rows } from './format'
@@ -19,6 +20,8 @@ const PANE = 'session-state'
 const TITLE = 'Session ledger'
 const MAX_FAILED = 5
 const PANEL_STEPS = 40
+// A chat met mid-way (new install, upgrade, resume) is read back from its transcript, up to this many turns.
+const BACKFILL_MAX = 100
 const TABS: Tab[] = ['steps', 'ledger', 'stats']
 
 const sessionId = atom({ plugin: 'session-state', key: 'sessionId' } as const, '')
@@ -104,8 +107,26 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   await update($, dir, () => folder)
   await update($, origin, () => cwd)
 
+  let ledger = parseLedger(await readText($, eventsOf(folder)))
+  let pending = parsePending(await readText($, pendingOf(folder)))
   let text = await readText($, stateOf(folder))
-  if (text === '') {
+  if (ledger.length === 0 && pending.length === 0) {
+    // The turns before the mod met this chat, read back from Claude Code's transcript and queued like live
+    // ones. The last turn is left out while its reply is still being written.
+    const past = parseTranscript(await readText($, transcriptOf(cwd, id).replace(/^~/, home)))
+    if (past.at(-1)?.answer === '') past.pop()
+    if (past.length > 0) {
+      const now = await $.clock.now()
+      pending = past.slice(-BACKFILL_MAX)
+      ledger = pending.map(t => turnRecord(t, now))
+      // The transcript is a fuller source than notes seeded from an older version.
+      if (text !== '') await $.fs.write(stateOf(folder), '').catch(quiet)
+      text = ''
+      await $.fs.write(eventsOf(folder), serializeLedger(ledger)).catch(quiet)
+      await $.fs.write(pendingOf(folder), serializePending(pending)).catch(quiet)
+    }
+  }
+  if (text === '' && pending.length === 0) {
     // A notes file from before 0.3 seeds the new ledger once; the old file is left as it is.
     const old = await findIn($, root, here, (name, kind) => kind === 'file' && name.endsWith(`${id8}.md`))
     if (old !== undefined) {
@@ -115,9 +136,7 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
       await $.fs.write(stateOf(folder), text).catch(quiet)
     }
   }
-  const ledger = parseLedger(await readText($, eventsOf(folder)))
   const archive = archivedTurns(ledger)
-  const pending = parsePending(await readText($, pendingOf(folder)))
   await update($, md, () => text)
   const stepsMd = await readText($, stepsOf(folder))
   await update($, steps, () => stepsMd)
@@ -125,7 +144,7 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   await update($, queue, () => pending)
   await update($, failed, () => [])
   await update($, pendingUser, () => '')
-  await update($, previousAnswer, () => archive.at(-1)?.answer ?? '')
+  await update($, previousAnswer, () => pending.at(-1)?.answer ?? archive.at(-1)?.answer ?? '')
   await update($, facts, () => emptyFacts())
   await update($, turns, () => Math.max(0, ...archive.map(r => r.turn), ...pending.map(t => t.turn)))
   await update($, status, () => ({ isBusy: false, turn: 0, message: '' }))
@@ -174,7 +193,8 @@ const handle = async ($: EngineInterface, config: Config, turn: PendingTurn): Pr
   const folder = await read($, dir)
   const state = loadState(await readText($, stateOf(folder)), await frontOf($))
   const stepsMd = await readText($, stepsOf(folder))
-  const ledger = await read($, events)
+  // A turn read back from the transcript sees only the turns before it, as it would have live.
+  const ledger = (await read($, events)).filter(e => e.type !== 'turn' || e.turn <= turn.turn)
 
   const outcome = await processTurn(
     hostOf($, config),
@@ -183,8 +203,8 @@ const handle = async ($: EngineInterface, config: Config, turn: PendingTurn): Pr
     turn,
   )
 
-  const all = await saveEvents($, outcome.events)
-  const out = renderState(outcome.state, ranked(outcome.state, all, turn.turn))
+  await saveEvents($, outcome.events)
+  const out = renderState(outcome.state, ranked(outcome.state, ledger, turn.turn))
   await $.fs.write(stateOf(folder), out)
   await update($, md, () => out)
   if (outcome.moved.length > 0) {
@@ -251,7 +271,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'session-state',
-      description: 'The ledger of this chat: open the panel (steps, ledger, stats), pause, retry',
+      description: 'The ledger of this chat: open the panel (steps, ledger, stats), pause, retry, rebuild',
     }).catch(quiet)
     await ensure($).catch(quiet)
     if ((await read($, queue)).length > 0) kick($, options)
@@ -304,6 +324,10 @@ export const register: Register = (on, options) => {
     if (e.agentId === undefined && out.deny === undefined) {
       const call = { tool: e.tool, input: e as unknown as Record<string, unknown>, isError: out.isError === true, text: out.text ?? '' }
       await update($, facts, f => addToolCall(f, call)).catch(quiet)
+      if (e.tool === 'AskUserQuestion' && out.isError !== true) {
+        const answers = answersOf(out.result ?? out.text)
+        if (answers !== '') await update($, pendingUser, p => withAnswers(p, answers)).catch(quiet)
+      }
     }
     return out
   })
@@ -380,6 +404,23 @@ export const register: Register = (on, options) => {
       kick($, options)
       return { text: `Retrying ${again.length} turn${again.length === 1 ? '' : 's'}.` }
     }
+    if (arg === 'rebuild') {
+      if ((await read($, status)).isBusy || (await read($, queue)).length > 0) return { text: 'Still recording turns; run rebuild when the queue is empty.' }
+      const folder = await ensure($)
+      // The current files move to before-rebuild/, then the next boot reads the chat back from its transcript.
+      for (const path of [stateOf(folder), stepsOf(folder), historyOf(folder), eventsOf(folder), pendingOf(folder)]) {
+        const text = await readText($, path)
+        if (text === '') continue
+        await $.fs.write(`${folder}/before-rebuild/${baseOf(path)}`, text)
+        await $.fs.write(path, '')
+      }
+      booting = undefined
+      await update($, sessionId, () => '')
+      await ensure($)
+      kick($, options)
+      const queued = (await read($, queue)).length
+      return { text: queued === 0 ? 'No earlier turns in the transcript to rebuild from.' : `Rebuilding the ledger from the transcript: ${queued} turns queued. The old files are in before-rebuild/.` }
+    }
     if (arg === 'path') return { text: await ensure($) }
     if (arg === 'digest') return { text: await digestOf($) }
     const chosen = TABS.find(t => t === arg)
@@ -404,6 +445,7 @@ export const register: Register = (on, options) => {
     if (shown === 'steps') {
       const lines = stepLines(await read($, steps))
       const s = await read($, status)
+      const queued = (await read($, queue)).length
       return (
         <Box flexDirection="column">
           {tabs}
@@ -412,7 +454,7 @@ export const register: Register = (on, options) => {
           {lines.slice(-PANEL_STEPS).map(line => (
             <Text key={line}>{line.slice(2)}</Text>
           ))}
-          {s.isBusy && <Text dimColor>{`recording t${s.turn}…`}</Text>}
+          {s.isBusy && <Text dimColor>{`recording t${s.turn}…${queued > 1 ? ` (${queued - 1} more queued)` : ''}`}</Text>}
         </Box>
       )
     }
