@@ -299,6 +299,29 @@ test('a chat met mid-way is read back from its transcript, so steps and turn num
   expect(calls.haiku).toBe(3)
 })
 
+test('a chat that Claude Code continues under a new session id after a compaction keeps its ledger', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.1, [{ step: { text: 'Wrote the docs.', outcome: 'ok' }, memories: [] }])
+  const OLD = `${ROOT}/demo/2026-10-16_old00001`
+  files.set(`${OLD}/state.md`, '---\nsession_id: old00001-0000\nproject: demo\ncwd: /work/demo\nstarted: 2026-10-16\ntranscript: ~/.claude/projects/-work-demo/old00001-0000.jsonl\nresume: claude --resume old00001-0000\ntitle: Storage\nnext_id: 2\nnext_learning: 1\n---\n# Storage\n\n## Decisions and rules\n### M-001 · decision · t1\nUse SQLite for storage.\nWhy: No server to run.\nQuote: "use SQLite"\nSource: t1 · turn u1\n')
+  files.set(`${OLD}/steps.md`, '# Steps\n- t1 · ✓ · Chose SQLite. · +M-001\n')
+  files.set(`${OLD}/events.jsonl`, `${JSON.stringify({ type: 'turn', at: 1, turn: 1, turnId: 'u1', user: 'use SQLite', answer: 'Done.', facts: {} })}\n`)
+  files.set('/h/.claude/projects/-work-demo/old00001-0000.jsonl', `${typed('u1', 'use SQLite')}\n${replied('Done.')}\n${JSON.stringify({ type: 'assistant', uuid: 'last-of-old' })}`)
+  files.set(TRANSCRIPT, JSON.stringify({ type: 'system', subtype: 'compact_boundary', logicalParentUuid: 'last-of-old' }))
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await $.prompt.compose(COMPOSE)
+  await say($, 'write the docs', 'Done.', 2)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t2'))
+
+  const md = files.get(STATE) ?? ''
+  expect(md).toContain('Use SQLite for storage.')
+  expect(md).toContain(`session_id: ${ID}`)
+  expect(md).toContain(`resume: claude --resume ${ID}`)
+  expect((files.get(STEPS) ?? '').split('\n').filter(l => l.startsWith('- t')).map(l => l.split(' · ')[0])).toEqual(['- t1', '- t2'])
+  expect(files.get(`${OLD}/state.md`) ?? '').toContain('session_id: old00001-0000')
+})
+
 test('what the user picks in the agent\'s questions counts as their words', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   const note = { step: { text: 'Chose the store.', outcome: 'ok' }, memories: [{ kind: 'decision', text: 'Use SQLite for storage.', why: '', context: '', quote: 'SQLite, the file one', refers_to: [], supersedes: [] }] }

@@ -59,6 +59,21 @@ export const answersOf = (result: unknown): string => {
 
 export const withAnswers = (user: string, answers: string): string => (answers === '' ? user : `${user}\n\n${answers}`)
 
+// After an auto-compaction Claude Code can continue the chat under a new session id. The new transcript opens
+// with a compact boundary whose logicalParentUuid is the last message of the old one.
+export const continuesFrom = (text: string): string | undefined => {
+  for (const raw of text.split('\n', 40)) {
+    if (!raw.includes('compact_boundary')) continue
+    try {
+      const d = JSON.parse(raw) as Line
+      if (d.subtype === 'compact_boundary' && typeof d.logicalParentUuid === 'string') return d.logicalParentUuid
+    } catch {
+      continue
+    }
+  }
+  return undefined
+}
+
 export const parseTranscript = (text: string): Turn[] => {
   const turns: Turn[] = []
   const uses = new Map<string, ToolUse>()

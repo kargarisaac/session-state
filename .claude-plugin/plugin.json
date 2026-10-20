@@ -1,6 +1,6 @@
 {
   "name": "session-state",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Keeps a ledger of a long chat (what you asked and decided, what was learned, the files that matter, one line per turn) that the agent can read, and hands it back after Claude Code compacts.",
   "author": {
     "name": "Isaac Kargar"

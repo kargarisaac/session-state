@@ -9,7 +9,7 @@ import { activeNotes, newFront, parseOldNotes, pointerText, rulesText, upsertInd
 import { processTurn } from '../core/pipeline'
 import { emptyState, HISTORY_HEAD, historyBlock, parseState, renderState, seedState } from '../core/state'
 import { appendStep, stepLines } from '../core/steps'
-import { answersOf, parseTranscript, withAnswers } from '../core/transcript'
+import { answersOf, continuesFrom, parseTranscript, withAnswers } from '../core/transcript'
 import type { Config, State } from '../core/types'
 import type { LedgerEvent, PendingTurn, Status, Tab } from '../types'
 import { gateLines, rows } from './format'
@@ -92,6 +92,35 @@ const loadState = (text: string, front: Record<string, string>): State => {
   return { ...parsed, front: { ...front, ...parsed.front } }
 }
 
+const LEDGER_FILES = [stateOf, stepsOf, historyOf, eventsOf, pendingOf]
+const MAX_PARENTS = 12
+
+// The ledger folder of the chat this one continues, found by the last message the new transcript points back to.
+const parentFolder = async ($: EngineInterface, here: string, folder: string, home: string, uuid: string): Promise<string | undefined> => {
+  const names = (await listOf($, here)).filter(e => e.kind === 'dir' && `${here}/${e.name}` !== folder).map(e => e.name).sort().reverse()
+  for (const name of names.slice(0, MAX_PARENTS)) {
+    const path = /^transcript:\s*(.+)$/m.exec(await readText($, stateOf(`${here}/${name}`)))?.[1]?.trim()
+    if (path !== undefined && (await readText($, path.replace(/^~/, home))).includes(uuid)) return `${here}/${name}`
+  }
+  return undefined
+}
+
+// A compaction that moved the chat to a new session id keeps its ledger: the old files are copied over, for this
+// session to carry on from. The old folder stays as it was.
+const inherit = async ($: EngineInterface, here: string, folder: string, home: string, transcript: string): Promise<void> => {
+  const uuid = continuesFrom(transcript)
+  if (uuid === undefined) return
+  const parent = await parentFolder($, here, folder, home, uuid)
+  if (parent === undefined) return
+  const front = await frontOf($)
+  for (const pathOf of LEDGER_FILES) {
+    const text = await readText($, pathOf(parent))
+    if (text === '') continue
+    const own = pathOf === stateOf ? text.replace(/^(session_id|transcript|resume):.*$/gm, (_, key: string) => `${key}: ${front[key]}`) : text
+    await $.fs.write(pathOf(folder), own).catch(quiet)
+  }
+}
+
 const boot = async ($: EngineInterface, id: string): Promise<string> => {
   if ((await read($, sessionId)) === id) {
     const known = await read($, dir)
@@ -102,10 +131,13 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   const root = `${home}/.claude/session-state`
   const here = `${root}/${projectOf(cwd)}`
   const id8 = `_${id.slice(0, 8)}`
-  const folder = (await findIn($, root, here, (name, kind) => kind === 'dir' && name.endsWith(id8))) ?? `${here}/${folderName(await dayOf($), id)}`
+  const found = await findIn($, root, here, (name, kind) => kind === 'dir' && name.endsWith(id8))
+  const folder = found ?? `${here}/${folderName(await dayOf($), id)}`
+  const transcript = await readText($, transcriptOf(cwd, id).replace(/^~/, home))
   await update($, sessionId, () => id)
   await update($, dir, () => folder)
   await update($, origin, () => cwd)
+  if (found === undefined) await inherit($, here, folder, home, transcript)
 
   let ledger = parseLedger(await readText($, eventsOf(folder)))
   let pending = parsePending(await readText($, pendingOf(folder)))
@@ -113,7 +145,7 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   if (ledger.length === 0 && pending.length === 0) {
     // The turns before the mod met this chat, read back from Claude Code's transcript and queued like live
     // ones. The last turn is left out while its reply is still being written.
-    const past = parseTranscript(await readText($, transcriptOf(cwd, id).replace(/^~/, home)))
+    const past = parseTranscript(transcript)
     if (past.at(-1)?.answer === '') past.pop()
     if (past.length > 0) {
       const now = await $.clock.now()

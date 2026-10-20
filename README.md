@@ -66,6 +66,8 @@ Quote: "Folder, split files"
 Source: t41 · turn 3f2a9c1b · answers t40
 ```
 
+When Claude Code auto-compacts a chat and carries on under a new session id, the new session starts from a copy of the old session's ledger (found through the compaction boundary at the top of the new transcript) and keeps numbering its turns from there. The old folder is left as it was.
+
 A chat the mod meets part-way (installed or upgraded mid-chat, or resumed) is read back from Claude Code's transcript: its last 100 turns are queued like live ones, so each gets a step line and its notes in the background, with the right turn numbers. Only when there is no transcript does a notes file from an older version (`<date>_<id8>.md`) seed the folder. Old files are left as they were.
 
 ## How it works
