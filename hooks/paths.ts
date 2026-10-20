@@ -10,12 +10,15 @@ export const projectOf = (cwd: string): string => slug(cwd.split('/').filter(Boo
 export const transcriptOf = (cwd: string, id: string): string =>
   `~/.claude/projects/${cwd.replace(/[^A-Za-z0-9]/g, '-')}/${id}.jsonl`
 
-export const fileName = (date: string, id: string): string => `${date}_${id.slice(0, 8)}.md`
+// One folder per session: <project>/<date>_<id8>/.
+export const folderName = (date: string, id: string): string => `${date}_${id.slice(0, 8)}`
 
-export const metricsOf = (file: string): string => file.replace(/\.md$/, '.metrics.jsonl')
+export const stateOf = (dir: string): string => `${dir}/state.md`
+export const stepsOf = (dir: string): string => `${dir}/steps.md`
+export const historyOf = (dir: string): string => `${dir}/history.md`
+export const eventsOf = (dir: string): string => `${dir}/events.jsonl`
+export const pendingOf = (dir: string): string => `${dir}/pending.json`
 
-export const dirOf = (file: string): string => file.slice(0, file.lastIndexOf('/'))
+export const dirOf = (path: string): string => path.slice(0, path.lastIndexOf('/'))
 
-export const baseOf = (file: string): string => file.slice(file.lastIndexOf('/') + 1)
-
-export const pendingOf = (file: string): string => file.replace(/\.md$/, '.pending.json')
+export const baseOf = (path: string): string => path.slice(path.lastIndexOf('/') + 1)

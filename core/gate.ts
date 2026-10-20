@@ -17,9 +17,15 @@ export const GATE_CRITERIA = {
 // Jev reads at most ~32k bytes before it switches to a slower mode: stay well under.
 const USER_CHARS = 8000
 const ANSWER_CHARS = 6000
+const PREVIOUS_CHARS = 2000
 
+// The end of the previous reply comes first: a short "yes" or "the second one" answers it.
 export const gateState = (turn: Turn): string =>
-  `User: ${tidy(turn.user, USER_CHARS)}\n\nAgent: ${tidy(turn.answer, ANSWER_CHARS)}`
+  [
+    ...(turn.previousAnswer.trim() === '' ? [] : [`Previous agent reply (end): ${tidy(turn.previousAnswer.slice(-PREVIOUS_CHARS), PREVIOUS_CHARS)}`]),
+    `User: ${tidy(turn.user, USER_CHARS)}`,
+    `Agent: ${tidy(turn.answer, ANSWER_CHARS)}`,
+  ].join('\n\n')
 
 export const gateBody = (model: string, turn: Turn): string =>
   JSON.stringify({

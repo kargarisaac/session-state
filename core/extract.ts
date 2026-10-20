@@ -1,46 +1,51 @@
-import { tidy } from './redact'
-import { KINDS } from './types'
-import type { Kind, Memory, Note, Turn } from './types'
+import { shortPath } from './facts'
+import { KINDS, LEARN_KINDS } from './types'
+import type { Kind, LearnKind, Learning, LearningDraft, Memory, Note, Step, TurnFacts } from './types'
 
-const USER_CHARS = 10000
-const ANSWER_CHARS = 6000
-const PREVIOUS_CHARS = 1500
+export type Mode = 'summarize' | 'extract'
 
-export const systemPrompt = (maxWords: number): string =>
+const WHY_WORDS = 60
+const STEP_WORDS = 25
+const ROLE_WORDS = 10
+
+const shared = [
+  'You keep the ledger of a long coding-agent chat, so the agent never forgets what the user asked and decided, what was learned, and which files matter, even after the chat is compacted.',
+  'You read the ledger, recent steps, the user\'s earlier messages, the previous reply and THIS TURN.',
+  '"step": what THIS TURN did or found, in at most 25 words, past tense, naming files, features and results. "outcome" is "failed" only when the turn ended without doing what was asked; otherwise "ok".',
+  '"done": ids of open "ask" notes that the agent\'s reply in this turn shows are finished: it says it did them and nothing is left. Never list one you are unsure about. Usually [].',
+  '"files": for each file under "Edited files with no role yet", its role in at most 10 words (what it is for, not what changed). Use the path as shown.',
+  `"learnings": only something the agent found out the hard way in THIS TURN that should stop it repeating a mistake later: an approach that failed and why ("failed"), or a hard limit of the environment, tool or data ("constraint"). "evidence" is an exact piece of the agent's reply or a failed command's output, copied character for character. "replaces" lists ids of active learnings it makes untrue. Kinds: ${LEARN_KINDS.join(', ')}. Usually [].`,
+]
+
+const memoryRules = (maxWords: number): string[] => [
+  'Also record what the USER said in THIS TURN that will still matter about 50 turns later: decisions, constraints and requirements, preferences, corrections and reversals, scope limits, always/never/from-now-on rules, and standing requests the agent could drop.',
+  'Never record one-off commands ("run the tests"), questions, acknowledgements, the current step of a task, or anything only the agent said.',
+  `"text": one sentence of at most ${maxWords} words, clear on its own. Name things the way the chat does: where the user says "it", "the video" or "the second one", write the real file, feature or option from the context. If the chat gives no name, keep the user's words; never invent one.`,
+  `"why": at most ${WHY_WORDS} words: the reason the user gave, or what problem it settles. "context": at most ${WHY_WORDS} words: what was being discussed, so a reader who never saw the chat understands the note. Write "" when there is nothing to add.`,
+  '"quote": an exact, contiguous piece of THE USER\'S MESSAGE IN THIS TURN that supports the note, copied character for character.',
+  '"refers_to": turn numbers of earlier turns this note answers or depends on, e.g. [40] when the user replies "yes" to a question asked in t40. Usually [].',
+  `"kind": one of ${KINDS.join(', ')}. "ask" is an action still to be done. "decision" is a choice that stays true. "requirement" and "preference" are rules for the rest of the chat. "correction" fixes something the agent got wrong.`,
+  '"supersedes": ids of active notes this note REPLACES or REVERSES (the user changed their mind about the same thing). A note that adds to or narrows an earlier one does NOT supersede it. When unsure, [].',
+  '"need": when you cannot understand the user\'s message without an older turn that is not shown in full (e.g. "do what I said about the deck"), the number of that turn; you will get it and answer again. Otherwise omit it.',
+]
+
+export const systemPrompt = (mode: Mode, maxWords: number): string =>
   [
-    'You keep short notes of what a user said in a coding-agent chat, so the agent can recall them about 50 turns later.',
-    'Record only things the USER said that will still matter about 50 turns later: decisions, constraints and requirements, preferences, corrections and reversals, scope limits, always/never/from-now-on rules, and standing requests the agent could drop.',
-    'Never record: one-off commands ("run the tests"), questions, acknowledgements, the current step of a task, or anything only the agent said.',
-    'The agent text is context. Use it to work out what a short reply like "yes" or "the second one" refers to, and write the note with that detail.',
-    'Name things the way the chat does. Where the user says "the video", "the deck", "it", "this" or "those decisions", write the real file, feature, product or person name from the agent text or the active notes. If the chat gives no name, keep the user\'s own words; never invent a name.',
-    `Each note is one sentence of at most ${maxWords} words, clear on its own: what was decided and the one detail that makes it unambiguous. No quotes.`,
-    `"kind" is one of: ${KINDS.join(', ')}. "ask" is an action still to be done (including "delete X", "update Y", "send Z"). "decision" is a choice that stays true. "requirement" and "preference" are rules for the rest of the chat. "correction" fixes something the agent got wrong.`,
-    '"quote" is an exact, contiguous piece of the USER\'S LATEST MESSAGE that supports the note, copied character for character.',
-    '"supersedes" lists the ids of active notes this note REPLACES or REVERSES (numbers, e.g. 2 for M-002): the user changed their mind about the same thing, so the old note is no longer true. A note that adds to, narrows or only relates to an earlier one does NOT supersede it; both stay. When unsure, use [].',
-    '"done" lists the ids of active "ask" notes that the agent\'s reply shows are now finished: it says it did them and nothing is left. Never list anything you are unsure about. Usually [].',
-    'Reply with JSON only, no prose: {"title": "<=6 words, only when the current title is (none)", "memories": [{"kind": "...", "text": "...", "quote": "...", "supersedes": []}], "done": []}',
-    'If nothing qualifies, reply {"memories": [], "done": []}.',
-  ].join('\n')
-
-export const noteLabel = (id: number): string => `M-${String(id).padStart(3, '0')}`
-
-export const userPrompt = (turn: Turn, active: Note[], title: string): string =>
-  [
-    `Current title: ${title === '' ? '(none)' : title}`,
-    'Active notes, oldest first:',
-    active.length === 0 ? '(none)' : active.map(n => `${noteLabel(n.id)} [${n.kind}] ${n.text}`).join('\n'),
-    '',
-    'Previous agent reply (end of it):',
-    turn.previousAnswer === '' ? '(none)' : tidy(turn.previousAnswer.slice(-PREVIOUS_CHARS), PREVIOUS_CHARS),
-    '',
-    "User's latest message:",
-    tidy(turn.user, USER_CHARS),
-    '',
-    "Agent's reply to it:",
-    turn.answer === '' ? '(none)' : tidy(turn.answer, ANSWER_CHARS),
+    ...shared,
+    ...(mode === 'extract' ? memoryRules(maxWords) : ['Do not record notes about the user in this run; "memories" is always [].']),
+    'Reply with JSON only, no prose:',
+    '{"title": "<=6 words, only when the current title is (none)", "step": {"text": "...", "outcome": "ok"}, "done": [], "files": [{"path": "...", "role": "..."}], ' +
+      '"learnings": [{"kind": "failed", "text": "...", "why": "...", "evidence": "...", "replaces": []}], ' +
+      '"memories": [{"kind": "...", "text": "...", "why": "...", "context": "...", "quote": "...", "refers_to": [], "supersedes": []}]' +
+      (mode === 'extract' ? ', "need": null}' : '}'),
   ].join('\n')
 
 export const wordCount = (text: string): number => (text.trim() === '' ? 0 : text.trim().split(/\s+/).length)
+
+const clipWords = (text: string, max: number): string => {
+  const words = text.trim().split(/\s+/)
+  return words.length <= max ? text.trim() : `${words.slice(0, max).join(' ')}…`
+}
 
 const squash = (s: string): string =>
   s
@@ -49,49 +54,71 @@ const squash = (s: string): string =>
     .replace(/\s+/g, ' ')
     .trim()
 
-export const isQuoteOf = (quote: string, user: string): boolean => {
+export const isQuoteOf = (quote: string, source: string): boolean => {
   const q = squash(quote)
-  return q.length >= 3 && squash(user).includes(q)
+  return q.length >= 3 && squash(source).includes(q)
 }
 
-export type Extraction = { title: string; memories: Memory[]; done: number[] }
+export type FileRole = { path: string; role: string }
+
+export type Extraction = {
+  title: string
+  step: { text: string; outcome: 'ok' | 'failed' }
+  done: number[]
+  files: FileRole[]
+  learnings: LearningDraft[]
+  memories: Memory[]
+  need?: number
+}
 
 const isKind = (v: unknown): v is Kind => typeof v === 'string' && (KINDS as readonly string[]).includes(v)
+const isLearnKind = (v: unknown): v is LearnKind => typeof v === 'string' && (LEARN_KINDS as readonly string[]).includes(v)
+const str = (v: unknown): string => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim() : '')
 
 const idOf = (v: unknown): number | undefined => {
   if (typeof v === 'number' && Number.isInteger(v)) return v
-  const m = typeof v === 'string' ? /^M?-?(\d+)$/i.exec(v.trim()) : null
+  const m = typeof v === 'string' ? /^[ML]?-?t?(\d+)$/i.exec(v.trim()) : null
   return m === null ? undefined : Number(m[1])
 }
 
 const idsOf = (v: unknown): number[] => (Array.isArray(v) ? v.map(idOf).filter((n): n is number => n !== undefined) : [])
 
+const objects = (v: unknown): Record<string, unknown>[] =>
+  Array.isArray(v) ? v.filter((x): x is Record<string, unknown> => x !== null && typeof x === 'object') : []
+
 export const parseExtraction = (text: string): Extraction | { error: string } => {
   const start = text.indexOf('{')
   const end = text.lastIndexOf('}')
   if (start < 0 || end <= start) return { error: 'no JSON object in the reply' }
-  let json: unknown
+  let json: Record<string, unknown>
   try {
-    json = JSON.parse(text.slice(start, end + 1))
+    json = JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>
   } catch {
     return { error: 'reply is not valid JSON' }
   }
-  const raw = (json as { memories?: unknown }).memories
-  if (!Array.isArray(raw)) return { error: 'no memories array' }
-  const memories: Memory[] = []
-  for (const m of raw) {
-    if (m === null || typeof m !== 'object') continue
-    const { kind, text: body, quote, supersedes } = m as Record<string, unknown>
-    if (!isKind(kind) || typeof body !== 'string' || typeof quote !== 'string') continue
-    memories.push({
-      kind,
-      text: body.replace(/\s+/g, ' ').trim(),
-      quote,
-      supersedes: idsOf(supersedes),
-    })
+  if (json === null || typeof json !== 'object') return { error: 'reply is not an object' }
+  const step = (json.step ?? {}) as Record<string, unknown>
+  const memories: Memory[] = objects(json.memories).flatMap(m =>
+    isKind(m.kind) && typeof m.text === 'string' && typeof m.quote === 'string'
+      ? [{ kind: m.kind, text: str(m.text), why: str(m.why), context: str(m.context), quote: m.quote, refersTo: idsOf(m.refers_to), supersedes: idsOf(m.supersedes) }]
+      : [],
+  )
+  const learnings: LearningDraft[] = objects(json.learnings).flatMap(l =>
+    isLearnKind(l.kind) && typeof l.text === 'string' && typeof l.evidence === 'string'
+      ? [{ kind: l.kind, text: str(l.text), why: str(l.why), evidence: l.evidence, replaces: idsOf(l.replaces) }]
+      : [],
+  )
+  const files = objects(json.files).flatMap(f => (typeof f.path === 'string' && typeof f.role === 'string' ? [{ path: f.path.trim(), role: str(f.role) }] : []))
+  const need = idOf(json.need)
+  return {
+    title: str(json.title),
+    step: { text: str(step.text), outcome: step.outcome === 'failed' ? 'failed' : 'ok' },
+    done: idsOf(json.done),
+    files,
+    learnings,
+    memories,
+    ...(need === undefined ? {} : { need }),
   }
-  const title = (json as { title?: unknown }).title
-  return { title: typeof title === 'string' ? title.replace(/\s+/g, ' ').trim() : '', memories, done: idsOf((json as { done?: unknown }).done) }
 }
 
 // Only a request still to be done can be finished, and only one that exists.
@@ -100,44 +127,10 @@ export const checkDone = (ids: number[], open: Note[]): number[] => {
   return [...new Set(ids.filter(id => asks.has(id)))]
 }
 
-const CLOSE_ANSWER_CHARS = 4000
-const CLOSE_USER_CHARS = 2000
-
-export const closeSystem = (): string =>
-  [
-    'A user gave a coding agent some requests in a chat. Below are the requests still open and the agent\'s latest reply.',
-    'Say which open requests that reply shows are now finished: the agent says it did them, and nothing of them is left.',
-    'A request that is only started, only planned or only discussed is not finished. When unsure, leave it out.',
-    'Reply with JSON only, no prose: {"done": [ids]}. Use the numbers, e.g. 2 for M-002. If none, {"done": []}.',
-  ].join('\n')
-
-export const closePrompt = (turn: Turn, open: Note[]): string =>
-  [
-    'Open requests:',
-    open.map(n => `${noteLabel(n.id)} ${n.text}`).join('\n'),
-    '',
-    "The user's message:",
-    tidy(turn.user, CLOSE_USER_CHARS),
-    '',
-    "The agent's reply:",
-    tidy(turn.answer, CLOSE_ANSWER_CHARS),
-  ].join('\n')
-
-export const parseClose = (text: string): { done: number[] } | { error: string } => {
-  const start = text.indexOf('{')
-  const end = text.lastIndexOf('}')
-  if (start < 0 || end <= start) return { error: 'no JSON object in the reply' }
-  try {
-    return { done: idsOf((JSON.parse(text.slice(start, end + 1)) as { done?: unknown }).done) }
-  } catch {
-    return { error: 'reply is not valid JSON' }
-  }
-}
-
 export type Checked = { kept: Memory[]; overLong: Memory[]; dropped: string[] }
 
 // Code, not the model, decides what is saved: the quote must be the user's own words.
-export const checkMemories = (memories: Memory[], user: string, active: Note[], maxWords: number): Checked => {
+export const checkMemories = (memories: Memory[], user: string, active: Note[], maxWords: number, turn: number): Checked => {
   const activeIds = new Set(active.map(n => n.id))
   const seen = new Set(active.map(n => squash(n.text).toLowerCase()))
   const kept: Memory[] = []
@@ -150,8 +143,48 @@ export const checkMemories = (memories: Memory[], user: string, active: Note[], 
     else if (seen.has(squash(m.text).toLowerCase())) dropped.push(`duplicate: ${m.text.slice(0, 40)}`)
     else {
       seen.add(squash(m.text).toLowerCase())
-      kept.push({ ...m, supersedes: m.supersedes.filter(id => activeIds.has(id)) })
+      kept.push({
+        ...m,
+        why: clipWords(m.why, WHY_WORDS),
+        context: clipWords(m.context, WHY_WORDS),
+        refersTo: [...new Set(m.refersTo.filter(t => t > 0 && t < turn))],
+        supersedes: m.supersedes.filter(id => activeIds.has(id)),
+      })
     }
   }
   return { kept, overLong, dropped }
 }
+
+// A learning must cite the agent's reply or a failed command word for word.
+export const checkLearnings = (drafts: LearningDraft[], answer: string, facts: TurnFacts, active: Learning[]): { kept: LearningDraft[]; dropped: string[] } => {
+  const source = [answer, ...facts.failures.map(f => `${f.command}\n${f.error}`)].join('\n')
+  const activeIds = new Set(active.filter(l => l.status === 'active').map(l => l.id))
+  const seen = new Set(active.map(l => squash(l.text).toLowerCase()))
+  const kept: LearningDraft[] = []
+  const dropped: string[] = []
+  for (const d of drafts) {
+    if (d.text === '') dropped.push('empty learning')
+    else if (!isQuoteOf(d.evidence, source)) dropped.push(`evidence not in the turn: ${d.text.slice(0, 40)}`)
+    else if (seen.has(squash(d.text).toLowerCase())) dropped.push(`duplicate learning: ${d.text.slice(0, 40)}`)
+    else {
+      seen.add(squash(d.text).toLowerCase())
+      kept.push({ ...d, why: clipWords(d.why, WHY_WORDS), replaces: d.replaces.filter(id => activeIds.has(id)) })
+    }
+  }
+  return { kept, dropped }
+}
+
+// A role is kept only for a file edited in this turn; the path comes back as the tool saw it.
+export const checkFileRoles = (roles: FileRole[], edited: string[], cwd: string): FileRole[] =>
+  roles.flatMap(r => {
+    const path = edited.find(p => p === r.path || shortPath(p, cwd) === r.path || p.endsWith(`/${r.path}`))
+    return path === undefined || r.role === '' ? [] : [{ path, role: clipWords(r.role, ROLE_WORDS) }]
+  })
+
+const firstWords = (text: string, max: number): string => clipWords(text.split('\n').find(l => l.trim() !== '') ?? '', max)
+
+// The step line's text: Haiku's, clipped, or the user's first words when Haiku gave none.
+export const checkStep = (text: string, user: string): string =>
+  text === '' ? `Asked: ${firstWords(user, 15)}` : clipWords(text, STEP_WORDS)
+
+export type { Step }

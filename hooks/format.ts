@@ -18,9 +18,10 @@ export type Row = { label: string; value: string }
 
 export type PanelInput = {
   stats: Stats
-  active: number
-  done: number
-  superseded: number
+  asks: number
+  rules: number
+  learnings: number
+  files: number
   config: Config
   status: Status
   isPaused: boolean
@@ -33,10 +34,10 @@ export const rows = (p: PanelInput): Row[] => {
   const state = p.isPaused
     ? 'paused'
     : p.status.isBusy
-      ? `extracting turn ${p.status.turn}`
+      ? `recording turn ${p.status.turn}`
       : 'idle'
   const list: Row[] = [
-    { label: 'Notes', value: `${p.active} active · ${p.done} done · ${p.superseded} superseded` },
+    { label: 'Ledger', value: `${p.asks} open asks · ${p.rules} decisions and rules · ${p.learnings} learnings · ${p.files} files` },
     { label: 'Turns', value: `${stats.turns} seen · ${stats.passed} passed · ${stats.skipped} skipped` },
     {
       label: 'Gate',
@@ -46,8 +47,12 @@ export const rows = (p: PanelInput): Row[] => {
           : `${config.jevModel} via OpenRouter · pass at p ≥ ${config.threshold} · avg ${duration(mean(stats.jevMs, stats.jevCalls))}`,
     },
     {
-      label: 'Extractor',
-      value: `${config.haikuModel} · effort ${config.effort} · via Claude Code · ${stats.extractions} runs · ${stats.closeChecks} done-checks · avg ${duration(mean(stats.haikuMs, stats.extractions + stats.closeChecks))}`,
+      label: 'Haiku',
+      value: `${config.haikuModel} · via Claude Code · ${stats.summaries} summaries (low) · ${stats.extractions} extractions (${config.effort}) · ${stats.lookups} look-backs · avg ${duration(mean(stats.haikuMs, stats.summaries + stats.extractions))}`,
+    },
+    {
+      label: 'Saved',
+      value: `${stats.saved} notes · ${stats.learned} learnings · ${stats.closed} asks closed · ${stats.dropped} dropped by checks`,
     },
     {
       label: 'Cost',

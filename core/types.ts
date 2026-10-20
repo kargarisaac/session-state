@@ -1,23 +1,69 @@
 export const KINDS = ['decision', 'preference', 'requirement', 'correction', 'ask'] as const
 export type Kind = (typeof KINDS)[number]
 
+export const LEARN_KINDS = ['failed', 'constraint'] as const
+export type LearnKind = (typeof LEARN_KINDS)[number]
+
+// Where a note came from: the turn, the engine's id for it, and the earlier turns it answers.
+export type Source = { turnId: string; refersTo: number[] }
+
 export type Note = {
   id: number
   turn: number
   kind: Kind
   text: string
+  why: string
+  context: string
+  quote: string
+  source: Source
   status: 'active' | 'superseded' | 'done'
   supersededBy?: number
   doneAt?: number
 }
 
-// A line the person wrote by hand under the notes: kept in place, never parsed further.
-export type Raw = { raw: string }
-export type Item = Note | Raw
+// Something the agent found out the hard way: an approach that failed, or a hard constraint.
+export type Learning = {
+  id: number
+  turn: number
+  kind: LearnKind
+  text: string
+  why: string
+  evidence: string
+  status: 'active' | 'superseded'
+  supersededBy?: number
+}
 
-export type Doc = {
+// The ledger as state.md holds it: only what is true now. `roles` maps a file path to what it is for.
+export type State = {
   front: Record<string, string>
-  items: Item[]
+  notes: Note[]
+  learnings: Learning[]
+  roles: Record<string, string>
+  own: string[]
+}
+
+// An item that left state.md, for history.md.
+export type Moved = { item: Note | Learning; reason: 'superseded' | 'done'; by?: number; turn: number }
+
+export type Step = {
+  turn: number
+  outcome: 'ok' | 'failed' | 'aborted'
+  text: string
+  facts: string
+  // Labels of what the turn added (M-012, L-003) and finished (M-009).
+  added: string[]
+  done: string[]
+}
+
+export type Failure = { command: string; error: string }
+
+// What the tools did in a turn, collected by code from the tool calls.
+export type TurnFacts = {
+  read: string[]
+  edited: string[]
+  commands: number
+  failures: Failure[]
+  commits: string[]
 }
 
 export type Turn = {
@@ -27,11 +73,24 @@ export type Turn = {
   answer: string
   previousAnswer: string
   isAborted: boolean
+  facts: TurnFacts
 }
+
+export type FileEntry = { path: string; reads: number; edits: number; first: number; last: number; role: string; score: number }
 
 export type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number }
 
-export type Memory = { kind: Kind; text: string; quote: string; supersedes: number[] }
+export type Memory = {
+  kind: Kind
+  text: string
+  why: string
+  context: string
+  quote: string
+  refersTo: number[]
+  supersedes: number[]
+}
+
+export type LearningDraft = { kind: LearnKind; text: string; why: string; evidence: string; replaces: number[] }
 
 export type Config = {
   gate: 'jev' | 'off'
@@ -47,9 +106,9 @@ export type Config = {
 
 export const DEFAULTS: Config = {
   gate: 'jev',
-  // eval/REPORT.md: at 0.7 precision is 96% and 93% on the two halves of 14 real chats; recall is about 53%.
+  // eval/REPORT.md: the lowest threshold whose held-out precision stays at 0.9 or more for jev-1.14 with the previous reply in view.
   threshold: 0.7,
-  jevModel: 'jev-1.13',
+  jevModel: 'jev-1.14',
   jevKey: '',
   haikuModel: 'claude-haiku-5-5',
   effort: 'high',
@@ -87,31 +146,34 @@ export type GateEvent = {
   error?: string
 }
 
+// One Haiku run on a turn: summarization always, extraction too when the gate passed.
 export type ExtractEvent = {
   type: 'extract'
   at: number
   turn: number
   turnId: string
   model: string
+  mode: 'summarize' | 'extract'
   ms: number
   usage: Usage
   kept: number
+  learned: number
+  closed: number
+  roles: number
+  need?: number
   dropped: string[]
-  closed?: number
   error?: string
 }
 
-// A turn the gate skipped, read only to see which open requests the agent finished.
-export type CloseEvent = {
-  type: 'close'
+// A turn as it was, redacted and clipped, so later turns can read it after Claude Code compacts.
+export type TurnRecord = {
+  type: 'turn'
   at: number
   turn: number
   turnId: string
-  model: string
-  ms: number
-  usage: Usage
-  closed: number
-  error?: string
+  user: string
+  answer: string
+  facts: TurnFacts
 }
 
-export type LedgerEvent = GateEvent | ExtractEvent | CloseEvent
+export type LedgerEvent = GateEvent | ExtractEvent | TurnRecord

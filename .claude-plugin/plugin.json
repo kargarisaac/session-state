@@ -35,8 +35,8 @@
     "jevModel": {
       "type": "string",
       "title": "Jev model",
-      "description": "OpenRouter decision model id, e.g. jev-1.13 or jev-1.14. Default: jev-1.13 (the one the threshold was calibrated on). Empty means the default.",
-      "default": "jev-1.13"
+      "description": "OpenRouter decision model id, e.g. jev-1.13 or jev-1.14. Default: jev-1.14 (the one the threshold is calibrated on). Empty means the default.",
+      "default": "jev-1.14"
     },
     "haikuModel": {
       "type": "string",

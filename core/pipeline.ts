@@ -1,58 +1,39 @@
-import { checkDone, checkMemories, closePrompt, closeSystem, parseClose, parseExtraction, systemPrompt, userPrompt } from './extract'
-import type { Extraction } from './extract'
+import { contextText } from './context'
+import type { TurnContext } from './context'
+import { checkDone, checkFileRoles, checkLearnings, checkMemories, checkStep, parseExtraction, systemPrompt } from './extract'
+import type { Extraction, Mode } from './extract'
+import { factsText } from './facts'
 import { runGate } from './gate'
 import { addUsage, emptyUsage } from './ledger'
 import { activeNotes, applyMemories, openAsks } from './notes'
-import type { CloseEvent, Config, Doc, ExtractEvent, GateEvent, Host, LedgerEvent, Turn } from './types'
+import { applyFileRoles, applyLearnings, learnLabel, noteLabel } from './state'
+import type { Config, ExtractEvent, FileEntry, Host, LedgerEvent, Moved, State, Step, Turn, TurnRecord } from './types'
 
-export type Outcome = { doc: Doc; events: LedgerEvent[] }
+export type Ledger = { state: State; steps: readonly string[]; archive: readonly TurnRecord[]; files: readonly FileEntry[] }
+
+export type Outcome = { state: State; moved: Moved[]; step: Step; events: LedgerEvent[] }
 
 const ATTEMPTS = 2
-// A shorter reply than this cannot report finished work.
-const MIN_ANSWER_CHARS = 60
 
-// The gate skipped the turn: the person said nothing lasting, but the agent may have finished an open
-// request. One cheap look at its reply, only when there is something open.
-const closeAsks = async (host: Host, config: Config, doc: Doc, turn: Turn, gate: GateEvent): Promise<Outcome> => {
-  const open = openAsks(doc)
-  if (open.length === 0 || turn.isAborted || turn.answer.trim().length < MIN_ANSWER_CHARS) return { doc, events: [gate] }
-  const start = await host.now()
-  const reply = await host.complete({ system: closeSystem(), prompt: closePrompt(turn, open), effort: 'low' })
-  const event = async (fields: Pick<CloseEvent, 'closed'> & { error?: string }): Promise<CloseEvent> => ({
-    type: 'close',
-    at: start,
-    turn: turn.turn,
-    turnId: turn.turnId,
-    model: config.haikuModel,
-    ms: (await host.now()) - start,
-    usage: reply.usage,
-    ...fields,
-  })
-  if (!reply.isOk) return { doc, events: [gate, await event({ closed: 0, error: `haiku: ${reply.reason}` })] }
-  const parsed = parseClose(reply.text)
-  if ('error' in parsed) return { doc, events: [gate, await event({ closed: 0, error: `haiku reply: ${parsed.error}` })] }
-  const done = checkDone(parsed.done, open)
-  const next = done.length > 0 ? applyMemories(doc, [], turn.turn, '', done) : doc
-  return { doc: next, events: [gate, await event({ closed: done.length })] }
-}
-
-// Gate, then extract, then check in code, then write. Never throws: a failure becomes an event.
-export const processTurn = async (host: Host, config: Config, doc: Doc, turn: Turn): Promise<Outcome> => {
+// One Haiku call per turn. Summarization always: the step line, finished asks, file roles and learnings.
+// Extraction too when Jev says the user said something lasting (or Jev is off or failed): the notes.
+// Never throws: a failure becomes an event, and the step line falls back to the user's first words.
+export const processTurn = async (host: Host, config: Config, ledger: Ledger, turn: Turn): Promise<Outcome> => {
   const gate = await runGate(host, config, turn)
-  if (!gate.isPassed) {
-    return gate.event.action === 'skip' ? closeAsks(host, config, doc, turn, gate.event) : { doc, events: [gate.event] }
-  }
-
+  const mode: Mode = gate.isPassed || gate.event.action === 'error' ? 'extract' : 'summarize'
+  const { state } = ledger
+  const cwd = state.front.cwd ?? ''
+  const earlier = ledger.archive.filter(r => r.turn < turn.turn)
+  const base: TurnContext = { state, steps: ledger.steps, earlier, files: ledger.files, turn }
+  const system = systemPrompt(mode, config.maxWords)
+  const effort = mode === 'extract' ? config.effort : 'low'
   const start = await host.now()
-  const active = activeNotes(doc)
-  const system = systemPrompt(config.maxWords)
-  const prompt = userPrompt(turn, active, doc.front.title ?? '')
   let usage = emptyUsage()
   let failure = ''
 
-  const ask = async (text: string): Promise<Extraction | undefined> => {
+  const ask = async (prompt: string): Promise<Extraction | undefined> => {
     for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
-      const reply = await host.complete({ system, prompt: text })
+      const reply = await host.complete({ system, prompt, effort })
       usage = addUsage(usage, reply.usage)
       if (!reply.isOk) {
         failure = `haiku: ${reply.reason}`
@@ -68,45 +49,72 @@ export const processTurn = async (host: Host, config: Config, doc: Doc, turn: Tu
     return undefined
   }
 
-  const finish = async (fields: Pick<ExtractEvent, 'kept' | 'dropped'> & { closed?: number; error?: string }): Promise<ExtractEvent> => ({
+  let context = base
+  let got = await ask(contextText(context))
+  // One look further back, only when Haiku names an archived turn it was not shown in full.
+  const need = mode === 'extract' ? got?.need : undefined
+  const looked = need === undefined ? undefined : earlier.find(r => r.turn === need)
+  if (looked !== undefined) {
+    context = { ...base, looked }
+    got = (await ask(contextText(context))) ?? got
+  }
+
+  const active = activeNotes(state)
+  const dropped: string[] = []
+  let memories = got === undefined || mode === 'summarize' ? undefined : checkMemories(got.memories, turn.user, active, config.maxWords, turn.turn)
+  if (got !== undefined && memories !== undefined && memories.overLong.length > 0) {
+    const list = memories.overLong.map(m => `"${m.text}"`).join('; ')
+    const again = await ask(
+      `${contextText(context)}\n\nThese notes were over ${config.maxWords} words: ${list}. Reply with the full JSON again, every note at most ${config.maxWords} words.`,
+    )
+    if (again !== undefined) {
+      got = { ...again, step: again.step.text === '' ? got.step : again.step }
+      memories = checkMemories(again.memories, turn.user, active, config.maxWords, turn.turn)
+    }
+    dropped.push(...memories.overLong.map(m => `too long: ${m.text.slice(0, 40)}`))
+  }
+  dropped.push(...(memories?.dropped ?? []))
+
+  const done = got === undefined ? [] : checkDone(got.done, openAsks(state))
+  const learned = got === undefined ? { kept: [], dropped: [] } : checkLearnings(got.learnings, turn.answer, turn.facts, state.learnings)
+  dropped.push(...learned.dropped)
+  const roles = got === undefined ? [] : checkFileRoles(got.files, turn.facts.edited, cwd)
+
+  const notes = applyMemories(state, memories?.kept ?? [], turn.turn, turn.turnId, got?.title ?? '', done)
+  const withLearnings = applyLearnings(notes.state, learned.kept, turn.turn)
+  const next = applyFileRoles(withLearnings.state, roles)
+  const moved = [...notes.moved, ...withLearnings.moved]
+
+  const firstNote = Number(state.front.next_id) || 1
+  const firstLearning = Number(state.front.next_learning) || 1
+  const added = [
+    ...next.notes.filter(n => n.turn === turn.turn && n.id >= firstNote).map(n => noteLabel(n.id)),
+    ...next.learnings.filter(l => l.turn === turn.turn && l.id >= firstLearning).map(l => learnLabel(l.id)),
+  ]
+  const step: Step = {
+    turn: turn.turn,
+    outcome: turn.isAborted ? 'aborted' : (got?.step.outcome ?? 'ok'),
+    text: checkStep(got?.step.text ?? '', turn.user),
+    facts: factsText(turn.facts, cwd),
+    added,
+    done: done.map(noteLabel),
+  }
+  const event: ExtractEvent = {
     type: 'extract',
     at: start,
     turn: turn.turn,
     turnId: turn.turnId,
     model: config.haikuModel,
+    mode,
     ms: (await host.now()) - start,
     usage,
-    ...fields,
-  })
-
-  const first = await ask(prompt)
-  if (first === undefined) {
-    return { doc, events: [gate.event, await finish({ kept: 0, dropped: [], error: failure })] }
+    kept: memories?.kept.length ?? 0,
+    learned: learned.kept.length,
+    closed: done.length,
+    roles: roles.length,
+    ...(looked === undefined ? {} : { need: looked.turn }),
+    dropped,
+    ...(got === undefined ? { error: failure } : {}),
   }
-
-  let checked = checkMemories(first.memories, turn.user, active, config.maxWords)
-  let title = first.title
-  let done = checkDone(first.done, openAsks(doc))
-  const dropped = [...checked.dropped]
-
-  if (checked.overLong.length > 0) {
-    const list = checked.overLong.map(m => `"${m.text}"`).join('; ')
-    const again = await ask(
-      `${prompt}\n\nThese notes were over ${config.maxWords} words: ${list}. Reply with the full JSON again, every note at most ${config.maxWords} words.`,
-    )
-    if (again === undefined) {
-      dropped.push(...checked.overLong.map(m => `too long: ${m.text.slice(0, 40)}`))
-      checked = { ...checked, overLong: [] }
-    } else {
-      const second = checkMemories(again.memories, turn.user, active, config.maxWords)
-      dropped.length = 0
-      dropped.push(...second.dropped, ...second.overLong.map(m => `too long: ${m.text.slice(0, 40)}`))
-      checked = { kept: second.kept, overLong: [], dropped: second.dropped }
-      title = again.title || title
-      done = checkDone(again.done, openAsks(doc))
-    }
-  }
-
-  const next = checked.kept.length > 0 || done.length > 0 ? applyMemories(doc, checked.kept, turn.turn, title, done) : doc
-  return { doc: next, events: [gate.event, await finish({ kept: checked.kept.length, dropped, closed: done.length })] }
+  return { state: next, moved, step, events: [gate.event, event] }
 }

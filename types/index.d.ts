@@ -1,4 +1,10 @@
+// The plugin's state contract. It must stand alone, so it mirrors core/types.ts rather than importing it.
+
 export type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number }
+
+export type Failure = { command: string; error: string }
+
+export type TurnFacts = { read: string[]; edited: string[]; commands: number; failures: Failure[]; commits: string[] }
 
 export type GateEvent = {
   type: 'gate'
@@ -20,27 +26,21 @@ export type ExtractEvent = {
   turn: number
   turnId: string
   model: string
+  mode: 'summarize' | 'extract'
   ms: number
   usage: Usage
   kept: number
-  dropped: string[]
-  closed?: number
-  error?: string
-}
-
-export type CloseEvent = {
-  type: 'close'
-  at: number
-  turn: number
-  turnId: string
-  model: string
-  ms: number
-  usage: Usage
+  learned: number
   closed: number
+  roles: number
+  need?: number
+  dropped: string[]
   error?: string
 }
 
-export type LedgerEvent = GateEvent | ExtractEvent | CloseEvent
+export type TurnRecord = { type: 'turn'; at: number; turn: number; turnId: string; user: string; answer: string; facts: TurnFacts }
+
+export type LedgerEvent = GateEvent | ExtractEvent | TurnRecord
 
 export type PendingTurn = {
   turn: number
@@ -49,25 +49,33 @@ export type PendingTurn = {
   answer: string
   previousAnswer: string
   isAborted: boolean
+  facts: TurnFacts
 }
 
 export type Status = { isBusy: boolean; turn: number; message: string }
+
+export type Tab = 'steps' | 'ledger' | 'stats'
 
 declare module 'claude-code' {
   interface PluginState {
     'session-state': {
       sessionId: string
-      file: string
+      dir: string
       origin: string
       md: string
+      steps: string
       events: LedgerEvent[]
       queue: PendingTurn[]
       failed: PendingTurn[]
       pendingUser: string
       previousAnswer: string
+      facts: TurnFacts
       turns: number
       status: Status
       isPaused: boolean
+      isCompacted: boolean
+      tab: Tab
+      isHistoryShown: boolean
     }
   }
 }
