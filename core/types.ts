@@ -106,8 +106,8 @@ export type Config = {
 
 export const DEFAULTS: Config = {
   gate: 'jev',
-  // eval/REPORT.md: the lowest threshold whose held-out precision stays at 0.9 or more for jev-1.14 with the previous reply in view.
-  threshold: 0.7,
+  // eval/REPORT.md: the lowest threshold whose precision reaches 0.9 on both halves, jev-1.14 with the previous reply in view.
+  threshold: 0.63,
   jevModel: 'jev-1.14',
   jevKey: '',
   haikuModel: 'claude-haiku-5-5',

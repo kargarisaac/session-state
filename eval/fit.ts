@@ -1,17 +1,18 @@
 // Step 4: pick the gate threshold on half the chats, score it once on the other half.
-//   bun eval/fit.ts [jev-model=jev-1.13] [target-precision=0.9]
+//   bun eval/fit.ts [jev-model=jev-1.14] [view=prev|none] [target-precision=0.9]  → REPORT-<model>-<view>.md
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { readJson } from './lib'
+import { readJson, scoreFile } from './lib'
 import type { EvalSession } from './lib'
 
-const MODEL = process.argv[2] ?? 'jev-1.13'
-const TARGET = Number(process.argv[3] ?? 0.9)
+const MODEL = process.argv[2] ?? 'jev-1.14'
+const VIEW = process.argv[3] === 'none' ? 'none' : 'prev'
+const TARGET = Number(process.argv[4] ?? 0.9)
 
 type Label = { important: boolean; kind?: string; source: 'agree' | 'adjudicated' }
 const sessions = readJson<EvalSession[]>('sessions.json', []).sort((a, b) => a.id.localeCompare(b.id))
 const labels = readJson<Record<string, Record<number, Label>>>('labels.json', {})
-const scores = readJson<Record<string, number>>(`scores-${MODEL.replace(/[^a-z0-9.]+/gi, '_')}.json`, {})
+const scores = readJson<Record<string, number>>(scoreFile(MODEL, VIEW), {})
 
 type Row = { sid: string; n: number; y: boolean; p: number; isShort: boolean; source: string; kind?: string }
 const rows: Row[] = []
@@ -80,7 +81,7 @@ const out = (s = '') => {
   console.log(s)
 }
 const shape = (set: Row[]) => `${set.length} turns, ${set.filter(r => r.y).length} important`
-out(`# Gate calibration: ${MODEL}`)
+out(`# Gate calibration: ${MODEL}, ${VIEW === 'prev' ? 'with the end of the previous reply in view' : 'user message and reply only'}`)
 out()
 out(`Sessions: ${sessions.length} real chats (${shape(rows)}). Fit half: ${shape(dev)}. Held-out half: ${shape(test)}.`)
 out(`Labels: ${rows.filter(r => r.source === 'agree').length} agreed by two independent passes, ${rows.filter(r => r.source === 'adjudicated').length} settled by a stronger model. The two passes agreed on ${pct(agreed / rows.length)} of turns.`)
@@ -128,4 +129,4 @@ for (const t of [...new Set([0.6, 0.65, 0.7, 0.75, 0.8, shipped])].sort((x, y) =
 out()
 out(`Shipped default: **${shipped}**, the lowest threshold whose precision reaches ${TARGET} on both halves. The threshold fit on one half alone is not trusted (it missed the bar on the other).`)
 
-writeFileSync(join(import.meta.dir, 'REPORT.md'), lines.join('\n') + '\n')
+writeFileSync(join(import.meta.dir, `REPORT-${MODEL.replace(/[^a-z0-9.]+/gi, '_')}-${VIEW}.md`), lines.join('\n') + '\n')

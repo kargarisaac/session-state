@@ -1,35 +1,30 @@
-# Gate calibration: jev-1.13
+# Gate calibration
 
-Sessions: 14 real chats (815 turns, 298 important). Fit half: 372 turns, 142 important. Held-out half: 443 turns, 156 important.
-Labels: 699 agreed by two independent passes, 116 settled by a stronger model. The two passes agreed on 85.8% of turns.
-Held-out ranking quality (AUC): 0.894 on held-out, 0.905 on the fit half.
+The gate asks Jev one question per turn: did the user say something that will still matter about 50 turns later?
+A turn at or above the threshold gets a full extraction; the others get a cheap summary only.
 
-Threshold chosen on the fit half for precision >= 0.9: **0.59**
+Data: 14 real chats, 815 turns, 298 important, labelled by two LLM passes with a stronger model settling the 14% they
+disagreed on. No human labels. The threshold is the lowest one whose precision reaches 0.9 on both halves of the chats.
 
-| Threshold | Passed | Precision (95% CI) | Recall (95% CI) |
-| --- | --- | --- | --- |
-| 0.3 | 270 | 50.7% (44.8% to 56.7%) | 87.8% (81.8% to 92.1%) |
-| 0.5 | 139 | 82.7% (75.6% to 88.1%) | 73.7% (66.3% to 80.0%) |
-| 0.59 (chosen) | 121 | 87.6% (80.6% to 92.3%) | 67.9% (60.3% to 74.8%) |
-| 0.7 | 88 | 93.2% (85.9% to 96.8%) | 52.6% (44.8% to 60.2%) |
-| 0.8 | 53 | 96.2% (87.2% to 99.0%) | 32.7% (25.8% to 40.4%) |
-| 0.9 | 14 | 100.0% (78.5% to 100.0%) | 9.0% (5.4% to 14.5%) |
+| Gate | Held-out AUC | Shipped threshold | Pooled precision (95% CI) | Pooled recall | Short-message recall |
+| --- | --- | --- | --- | --- | --- |
+| jev-1.13, user message and reply | 0.894 | 0.68 | 93.8% (89.2% to 96.5%) | 55.4% | 33% (2 of 6) |
+| jev-1.14, user message and reply | 0.843 | 0.64 | 93.7% (89.0% to 96.4%) | 54.7% | 17% (1 of 6) |
+| **jev-1.14, with the end of the previous reply (shipped)** | **0.909** | **0.63** | 92.0% (87.4% to 95.0%) | **61.7%** | 33% (2 of 6) |
 
-At 0.59 on held-out: 106 of 121 passed turns are important; 50 important turns are missed.
-Short messages (40 characters or less): 95 turns, 6 important, recall 33.3% (9.7% to 70.0%).
-Precision on the fit half at 0.59: 90.2%.
+Showing Jev the last 2,000 characters of the previous reply lets it read a short "yes" or "the second one" as the answer
+it is. On jev-1.14 that raised held-out AUC from 0.843 to 0.909 and recall by 7 points at about the same precision.
+Only 6 short messages are labelled important, so the short-message figures are too small to compare.
 
-Acceptance (held-out precision >= 0.9): NOT MET.
+A missed turn is not lost: it still gets a summary step, and the user's words stay in the archive, which a later
+extraction can look back at.
 
-## Both halves
+Full tables: [jev-1.14 with previous reply](REPORT-jev_1.14-prev.md), [jev-1.14 without](REPORT-jev_1.14-none.md),
+[jev-1.13 without](REPORT-jev_1.13-none.md).
 
-| Threshold | Fit half precision | Held-out precision | Pooled precision (95% CI) | Pooled recall |
-| --- | --- | --- | --- | --- |
-| 0.6 | 91.1% (101) | 87.6% (121) | 89.2% (84.4% to 92.6%) | 66.4% |
-| 0.65 | 96.6% (89) | 89.8% (108) | 92.9% (88.4% to 95.7%) | 61.4% |
-| 0.68 (shipped) | 96.3% (82) | 91.5% (94) | 93.8% (89.2% to 96.5%) | 55.4% |
-| 0.7 | 96.2% (79) | 93.2% (88) | 94.6% (90.1% to 97.1%) | 53.0% |
-| 0.75 | 98.5% (67) | 93.3% (75) | 95.8% (91.1% to 98.0%) | 45.6% |
-| 0.8 | 98.1% (54) | 96.2% (53) | 97.2% (92.1% to 99.0%) | 34.9% |
+Rerun:
 
-Shipped default: **0.68**, the lowest threshold whose precision reaches 0.9 on both halves. The threshold fit on one half alone is not trusted (it missed the bar on the other).
+```bash
+OPENROUTER_API_KEY=... bun eval/score.ts jev-1.14 prev   # about $0.05
+bun eval/fit.ts jev-1.14 prev
+```

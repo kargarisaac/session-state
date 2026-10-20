@@ -83,6 +83,12 @@ export const listSessions = (skip: string[]): EvalSession[] => {
   return out
 }
 
+// Scores before 0.3 were saved without a view suffix and saw no previous reply.
+export const scoreFile = (model: string, view: 'prev' | 'none'): string => {
+  const base = `scores-${model.replace(/[^a-z0-9.]+/gi, '_')}`
+  return view === 'none' && existsSync(join(DATA, `${base}.json`)) ? `${base}.json` : `${base}-${view}.json`
+}
+
 export const clipText = (s: string, max: number): string => (s.length <= max ? s : `${s.slice(0, max)} [...]`)
 
 // One headless call on the Claude Code login (the subscription): no tools, no session saved.

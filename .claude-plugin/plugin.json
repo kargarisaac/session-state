@@ -1,7 +1,7 @@
 {
   "name": "session-state",
-  "version": "0.2.0",
-  "description": "Keeps short notes of what you asked and decided in a long chat, in a session.md the agent can read, with a side panel.",
+  "version": "0.3.0",
+  "description": "Keeps a ledger of a long chat (what you asked and decided, what was learned, the files that matter, one line per turn) that the agent can read, and hands it back after Claude Code compacts.",
   "author": {
     "name": "Isaac Kargar"
   },
@@ -27,8 +27,8 @@
     "threshold": {
       "type": "number",
       "title": "Gate threshold",
-      "description": "A turn goes to Haiku when Jev's probability is at least this. 0.7 keeps about 94% of saved notes on target and finds about half of the important turns; lower is noisier, higher misses more. Default: 0.7.",
-      "default": 0.7,
+      "description": "A turn gets a full extraction when Jev's probability is at least this; other turns get a cheap summary only. 0.63 keeps about 92% of passed turns on target and passes about 62% of the important ones (jev-1.14, eval/REPORT.md). Lower is noisier, higher misses more. Default: 0.63.",
+      "default": 0.63,
       "min": 0,
       "max": 1
     },

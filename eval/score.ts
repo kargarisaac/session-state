@@ -1,23 +1,26 @@
 // Step 3: ask Jev the gate question about every labelled turn, exactly as the mod does (same redaction, same caps).
-//   OPENROUTER_API_KEY=... bun eval/score.ts [jev-model=jev-1.13]
+//   OPENROUTER_API_KEY=... bun eval/score.ts [jev-model=jev-1.14] [view=prev|none]
+// view "prev" shows Jev the end of the previous reply, as the mod does since 0.3; "none" is the gate before 0.3.
 import { gateBody, parseGate } from '../core/gate'
-import { pool, readJson, writeJson } from './lib'
+import { emptyFacts } from '../core/facts'
+import { pool, readJson, scoreFile, writeJson } from './lib'
 import type { EvalSession } from './lib'
 
-const MODEL = process.argv[2] ?? 'jev-1.13'
+const MODEL = process.argv[2] ?? 'jev-1.14'
+const VIEW = process.argv[3] === 'none' ? 'none' : 'prev'
 const KEY = process.env.OPENROUTER_API_KEY
 if (KEY === undefined || KEY === '') throw new Error('OPENROUTER_API_KEY is not set')
 
 const sessions = readJson<EvalSession[]>('sessions.json', [])
 const labels = readJson<Record<string, unknown>>('labels.json', {})
-const file = `scores-${MODEL.replace(/[^a-z0-9.]+/gi, '_')}.json`
+const file = scoreFile(MODEL, VIEW)
 const scores = readJson<Record<string, number>>(file, {})
 
 const jobs = sessions
   .filter(s => labels[s.id] !== undefined)
-  .flatMap(s => s.turns.map(t => ({ key: `${s.id}:${t.n}`, turn: { turn: t.n, turnId: `${s.id}:${t.n}`, user: t.user, answer: t.answer, previousAnswer: t.previousAnswer, isAborted: false } })))
+  .flatMap(s => s.turns.map(t => ({ key: `${s.id}:${t.n}`, turn: { turn: t.n, turnId: `${s.id}:${t.n}`, user: t.user, answer: t.answer, previousAnswer: VIEW === 'prev' ? t.previousAnswer : '', isAborted: false, facts: emptyFacts() } })))
   .filter(j => scores[j.key] === undefined)
-console.log(`${jobs.length} turns to score with ${MODEL}`)
+console.log(`${jobs.length} turns to score with ${MODEL} (${VIEW})`)
 
 let cost = 0
 let done = 0
