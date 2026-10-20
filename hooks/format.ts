@@ -19,6 +19,7 @@ export type Row = { label: string; value: string }
 export type PanelInput = {
   stats: Stats
   active: number
+  done: number
   superseded: number
   config: Config
   status: Status
@@ -35,7 +36,7 @@ export const rows = (p: PanelInput): Row[] => {
       ? `extracting turn ${p.status.turn}`
       : 'idle'
   const list: Row[] = [
-    { label: 'Notes', value: `${p.active} active · ${p.superseded} superseded` },
+    { label: 'Notes', value: `${p.active} active · ${p.done} done · ${p.superseded} superseded` },
     { label: 'Turns', value: `${stats.turns} seen · ${stats.passed} passed · ${stats.skipped} skipped` },
     {
       label: 'Gate',
@@ -46,7 +47,7 @@ export const rows = (p: PanelInput): Row[] => {
     },
     {
       label: 'Extractor',
-      value: `${config.haikuModel} · effort ${config.effort} · via Claude Code · ${stats.extractions} runs · avg ${duration(mean(stats.haikuMs, stats.extractions))}`,
+      value: `${config.haikuModel} · effort ${config.effort} · via Claude Code · ${stats.extractions} runs · ${stats.closeChecks} done-checks · avg ${duration(mean(stats.haikuMs, stats.extractions + stats.closeChecks))}`,
     },
     {
       label: 'Cost',

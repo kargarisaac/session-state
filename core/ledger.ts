@@ -24,6 +24,8 @@ export type Stats = {
   gateErrors: number
   extractions: number
   extractErrors: number
+  closeChecks: number
+  closed: number
   saved: number
   dropped: number
   jevCost: number
@@ -38,7 +40,7 @@ export type Stats = {
 
 export const summarize = (events: readonly LedgerEvent[]): Stats => {
   const stats: Stats = {
-    turns: 0, passed: 0, skipped: 0, gateErrors: 0, extractions: 0, extractErrors: 0, saved: 0, dropped: 0,
+    turns: 0, passed: 0, skipped: 0, gateErrors: 0, extractions: 0, extractErrors: 0, closeChecks: 0, closed: 0, saved: 0, dropped: 0,
     jevCost: 0, jevMs: 0, jevCalls: 0, haikuUsage: emptyUsage(), haikuCost: 0, haikuMs: 0, lastGates: [],
   }
   for (const e of events) {
@@ -55,9 +57,17 @@ export const summarize = (events: readonly LedgerEvent[]): Stats => {
         stats.jevMs += e.ms
       }
       stats.lastGates.push(e)
+    } else if (e.type === 'close') {
+      stats.closeChecks += 1
+      stats.closed += e.closed
+      stats.haikuUsage = addUsage(stats.haikuUsage, e.usage)
+      stats.haikuCost += haikuCost(e.usage)
+      stats.haikuMs += e.ms
+      if (e.error !== undefined) stats.lastError = e.error
     } else {
       stats.extractions += 1
       stats.saved += e.kept
+      stats.closed += e.closed ?? 0
       stats.dropped += e.dropped.length
       stats.haikuUsage = addUsage(stats.haikuUsage, e.usage)
       stats.haikuCost += haikuCost(e.usage)
@@ -79,7 +89,7 @@ export const parseLedger = (text: string): LedgerEvent[] =>
     .flatMap(line => {
       try {
         const e = JSON.parse(line) as LedgerEvent
-        return e.type === 'gate' || e.type === 'extract' ? [e] : []
+        return e.type === 'gate' || e.type === 'extract' || e.type === 'close' ? [e] : []
       } catch {
         return []
       }

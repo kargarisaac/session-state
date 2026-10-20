@@ -1,6 +1,6 @@
 # session-state
 
-A Claude Code mod that stops a long chat from losing what you asked and decided. After each turn it saves what you said that will still matter 50 turns later (decisions, preferences, requirements, corrections) as one short line in a `session.md`, and tells the agent where the file is. An optional side panel shows the notes, models, counts and cost.
+A Claude Code mod that stops a long chat from losing what you asked and decided. After each turn it saves what you said that will still matter 50 turns later (decisions, preferences, requirements, corrections) as one short line in a `session.md`, marks requests as done once the agent reports them finished, and tells the agent where the file is. An optional side panel shows the notes, models, counts and cost.
 
 ## Install
 
@@ -34,17 +34,22 @@ The notes live in `~/.claude/session-state/<project>/<date>_<id8>.md`, with an `
 - M-001 · t3 · decision · Haiku 5.5 via Claude Code subscription, not OpenRouter.
 - ~~M-002 · t7 · decision · Store memories in a database.~~ → superseded by M-005
 - M-005 · t12 · correction · Store memories in session.md; hand edits must stick.
+- ~~M-006 · t13 · ask · Rename the video to Nablo Product Tour.~~ → done t15
 ```
 
 ## How it works
 
 ![Flow of the mod: turn, Jev gate, Haiku, code checks, session.md, side panel, and the system-prompt line](docs/flow.png)
 
-Per turn, tool calls are dropped. **Jev** (a yes/no decision model on OpenRouter) gates the turn; **Haiku 5.5 at high effort**, run on your Claude Code login (plan usage, not billed), writes the notes. Only what you said becomes a note, at most 15 words each, and a new note strikes through the one it replaces. Code checks every note against your message before it is saved.
+Per turn, tool calls are dropped. **Jev** (a yes/no decision model on OpenRouter) gates the turn; **Haiku 5.5 at high effort**, run on your Claude Code login (plan usage, not billed), writes the notes. Only what you said becomes a note, at most 15 words each, and a new note strikes through the one it replaces. Notes use the real names from the chat (`nablo-film-4k.mp4`, not "the video"). Code checks every note against your message before it is saved.
 
-**What the agent is told.** One fixed line is added to the system prompt, the same text on every request, so it costs one cache write:
+**Done requests.** When a turn is skipped by the gate but you still have open requests (`ask` notes), Haiku reads the agent's reply once, at low effort, and strikes through the requests it clearly reports as finished (`→ done t15`). On turns the gate passes, this comes in the same run as the notes. Rules and decisions are never marked done. This uses a little plan quota on turns with open requests; nothing more leaves Claude Code.
+
+**What the agent is told.** Two things are added to the system prompt. The first is one fixed line, the same text on every request, so it costs one cache write:
 
 > Session notes: a tool keeps short notes of what the user asked and decided in this conversation at `<path to session.md>`. The file may not exist until the first note is saved. Lines are in the order the user said things, oldest first; a later line overrides an earlier one, and struck-through (~~) lines are history. Read it with the Read tool when you need to recall what the user asked or decided, after a compaction, or when you are unsure which decision is current. Do not edit it; it is maintained automatically.
+
+The second is your rules: the active `requirement` and `preference` notes (the newest 8), so the agent follows them without opening the file. It changes only when a rule is added or removed, and Claude Code then re-reads the chat once. Turn it off with `pinRules`.
 
 ## Settings
 
@@ -57,6 +62,7 @@ Per turn, tool calls are dropped. **Jev** (a yes/no decision model on OpenRouter
 | `haikuModel` / `effort` | `claude-haiku-5-5` / `high` | Extractor |
 | `maxWords` | `15` | Longest note |
 | `auditRate` | `0` | Share of skipped turns sent to Haiku anyway, to check the gate |
+| `pinRules` | on | Put your rules in the agent's system prompt |
 | `openPanelOnStart` | off | Open the panel with each session |
 
 ## Privacy

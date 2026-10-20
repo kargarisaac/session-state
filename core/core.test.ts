@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import { checkMemories, isQuoteOf, parseExtraction, wordCount } from './extract'
 import { parseGate } from './gate'
 import { haikuCost, parseLedger, serializeLedger, summarize } from './ledger'
-import { activeNotes, applyMemories, newDoc, parseDoc, renderDoc, upsertIndex } from './notes'
+import { activeNotes, applyMemories, newDoc, openAsks, parseDoc, renderDoc, rulesText, upsertIndex } from './notes'
 import { processTurn } from './pipeline'
 import { clip, redact } from './redact'
 import { DEFAULTS } from './types'
@@ -14,8 +14,11 @@ const USAGE = { input: 1000, output: 100, cacheRead: 0, cacheWrite: 0 }
 
 const turn = (user: string, n = 1): Turn => ({ turn: n, turnId: `t${n}`, user, answer: 'Done.', previousAnswer: '', isAborted: false })
 
-const memory = (text: string, quote: string, supersedes: number[] = []): Memory => ({ kind: 'decision', text, quote, supersedes })
-const reply = (memories: Memory[], title = ''): CompleteResult => ({ isOk: true, text: JSON.stringify({ title, memories }), usage: USAGE })
+const memory = (text: string, quote: string, supersedes: number[] = [], kind: Memory['kind'] = 'decision'): Memory => ({ kind, text, quote, supersedes })
+const reply = (memories: Memory[], title = '', done: number[] = []): CompleteResult => ({ isOk: true, text: JSON.stringify({ title, memories, done }), usage: USAGE })
+const closeReply = (done: number[]): CompleteResult => ({ isOk: true, text: JSON.stringify({ done }), usage: USAGE })
+
+const LONG_ANSWER = 'I renamed the video to Nablo Product Tour and updated every reference in the repo and the deck.'
 
 // A host whose Jev answer and Haiku replies are scripted; it records every call.
 const fakeHost = (p: number | 'down', replies: CompleteResult[]) => {
@@ -117,9 +120,9 @@ test('a note file round-trips, keeps hand-written lines, and a deleted line stay
 })
 
 test('the index keeps one row per file, newest first', async () => {
-  let md = upsertIndex('', 'demo', { file: '2026-10-16_aaaa1111.md', date: '2026-10-16', title: 'Old', active: 1, superseded: 0 })
-  md = upsertIndex(md, 'demo', { file: '2026-10-17_bbbb2222.md', date: '2026-10-17', title: 'New | pipe', active: 2, superseded: 1 })
-  md = upsertIndex(md, 'demo', { file: '2026-10-16_aaaa1111.md', date: '2026-10-16', title: 'Old', active: 5, superseded: 0 })
+  let md = upsertIndex('', 'demo', { file: '2026-10-16_aaaa1111.md', date: '2026-10-16', title: 'Old', active: 1, done: 0, superseded: 0 })
+  md = upsertIndex(md, 'demo', { file: '2026-10-17_bbbb2222.md', date: '2026-10-17', title: 'New | pipe', active: 2, done: 0, superseded: 1 })
+  md = upsertIndex(md, 'demo', { file: '2026-10-16_aaaa1111.md', date: '2026-10-16', title: 'Old', active: 5, done: 0, superseded: 0 })
   const rows = md.split('\n').filter(l => l.startsWith('| 20'))
   expect(rows.length).toBe(2)
   expect(rows[0]).toContain('bbbb2222')
@@ -211,4 +214,68 @@ test('the ledger round-trips and its totals match the events', async () => {
   expect(stats).toMatchObject({ turns: 1, passed: 1, saved: 1, jevCalls: 1, extractions: 1 })
   expect(stats.haikuCost).toBe(haikuCost(USAGE))
   expect(Math.abs(stats.jevCost - 0.000015)).toBeLessThan(1e-9)
+})
+
+test('a finished request is struck as done, round-trips, and only requests can be finished', async () => {
+  let doc = applyMemories(newDoc(FACTS), [memory('Rename the video.', 'q', [], 'ask'), memory('Use SQLite.', 'q')], 2, '')
+  expect(openAsks(doc).map(n => n.id)).toEqual([1])
+  doc = applyMemories(doc, [], 6, '', [1])
+  const md = renderDoc(doc)
+  expect(md).toContain('- ~~M-001 · t2 · ask · Rename the video.~~ → done t6')
+  expect(parseDoc(md).items).toEqual(doc.items)
+  expect(openAsks(doc).length).toBe(0)
+  expect(activeNotes(doc).map(n => n.id)).toEqual([2])
+})
+
+test('the rules for the system prompt are only requirements and preferences, newest eight', async () => {
+  expect(rulesText(newDoc(FACTS))).toBe('')
+  const rules = Array.from({ length: 10 }, (_, i) => memory(`Rule ${i + 1}.`, 'q', [], 'requirement'))
+  const doc = applyMemories(newDoc(FACTS), [...rules, memory('Use SQLite.', 'q'), memory('Rename it.', 'q', [], 'ask'), memory('Short answers.', 'q', [], 'preference')], 1, '')
+  const text = rulesText(doc)
+  expect(text).toContain('- Short answers.')
+  expect(text).toContain('- Rule 10.')
+  expect(text.includes('- Rule 3.')).toBe(false)
+  expect(text.includes('Use SQLite')).toBe(false)
+  expect(text.includes('Rename it')).toBe(false)
+  expect(text).toContain('3 older rules are in the notes file')
+})
+
+test('a skipped turn still closes an open request the agent finished, with one cheap look', async () => {
+  const seed = applyMemories(newDoc(FACTS), [memory('Rename the video.', 'q', [], 'ask'), memory('Use SQLite.', 'q')], 1, '')
+  const { host, calls } = fakeHost(0.05, [closeReply([1, 2, 99])])
+  const out = await processTurn(host, config(), seed, { ...turn('ok thanks', 2), answer: LONG_ANSWER })
+  expect(calls.complete).toBe(1)
+  expect(renderDoc(out.doc)).toContain('~~M-001 · t1 · ask · Rename the video.~~ → done t2')
+  expect(activeNotes(out.doc).map(n => n.id)).toEqual([2])
+  expect(out.events[1]).toMatchObject({ type: 'close', closed: 1, usage: USAGE })
+  expect(summarize(out.events)).toMatchObject({ closeChecks: 1, closed: 1, extractions: 0 })
+})
+
+test('no look at the reply when nothing is open, the reply is short, or the turn was cut off', async () => {
+  const seed = applyMemories(newDoc(FACTS), [memory('Rename the video.', 'q', [], 'ask')], 1, '')
+  const none = fakeHost(0.05, [closeReply([1])])
+  await processTurn(none.host, config(), newDoc(FACTS), { ...turn('ok', 2), answer: LONG_ANSWER })
+  const short = fakeHost(0.05, [closeReply([1])])
+  await processTurn(short.host, config(), seed, turn('ok', 2))
+  const cut = fakeHost(0.05, [closeReply([1])])
+  await processTurn(cut.host, config(), seed, { ...turn('ok', 2), answer: LONG_ANSWER, isAborted: true })
+  expect([none.calls.complete, short.calls.complete, cut.calls.complete]).toEqual([0, 0, 0])
+})
+
+test('a failed look at the reply loses nothing and is not a failed turn', async () => {
+  const seed = applyMemories(newDoc(FACTS), [memory('Rename the video.', 'q', [], 'ask')], 1, '')
+  const { host } = fakeHost(0.05, [])
+  const out = await processTurn(host, config(), seed, { ...turn('ok', 2), answer: LONG_ANSWER })
+  expect(out.doc).toBe(seed)
+  expect(out.events[1]).toMatchObject({ type: 'close', closed: 0, error: 'haiku: no scripted reply' })
+})
+
+test('a turn that passes the gate can add a note and finish a request in one run', async () => {
+  const seed = applyMemories(newDoc(FACTS), [memory('Rename the video.', 'q', [], 'ask')], 1, '')
+  const { host, calls } = fakeHost(0.95, [reply([memory('Never use Opus as a subagent.', 'never use Opus', [], 'requirement')], '', [1])])
+  const out = await processTurn(host, config(), seed, { ...turn('good, and never use Opus as a subagent', 2), answer: LONG_ANSWER })
+  expect(calls.complete).toBe(1)
+  expect(activeNotes(out.doc).map(n => n.text)).toEqual(['Never use Opus as a subagent.'])
+  expect(renderDoc(out.doc)).toContain('→ done t2')
+  expect(out.events[1]).toMatchObject({ type: 'extract', kept: 1, closed: 1 })
 })

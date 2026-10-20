@@ -6,8 +6,9 @@ export type Note = {
   turn: number
   kind: Kind
   text: string
-  status: 'active' | 'superseded'
+  status: 'active' | 'superseded' | 'done'
   supersededBy?: number
+  doneAt?: number
 }
 
 // A line the person wrote by hand under the notes: kept in place, never parsed further.
@@ -41,6 +42,7 @@ export type Config = {
   effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   maxWords: number
   auditRate: number
+  pinRules: boolean
 }
 
 export const DEFAULTS: Config = {
@@ -53,6 +55,7 @@ export const DEFAULTS: Config = {
   effort: 'high',
   maxWords: 15,
   auditRate: 0,
+  pinRules: true,
 }
 
 export type CompleteResult =
@@ -66,7 +69,7 @@ export type PostResult = { status: number; text: string }
 export type Host = {
   now: () => Promise<number>
   random: () => number
-  complete: (req: { system: string; prompt: string }) => Promise<CompleteResult>
+  complete: (req: { system: string; prompt: string; effort?: Config['effort'] }) => Promise<CompleteResult>
   post: (url: string, headers: Record<string, string>, body: string) => Promise<PostResult>
 }
 
@@ -94,7 +97,21 @@ export type ExtractEvent = {
   usage: Usage
   kept: number
   dropped: string[]
+  closed?: number
   error?: string
 }
 
-export type LedgerEvent = GateEvent | ExtractEvent
+// A turn the gate skipped, read only to see which open requests the agent finished.
+export type CloseEvent = {
+  type: 'close'
+  at: number
+  turn: number
+  turnId: string
+  model: string
+  ms: number
+  usage: Usage
+  closed: number
+  error?: string
+}
+
+export type LedgerEvent = GateEvent | ExtractEvent | CloseEvent

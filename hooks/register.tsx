@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, Register } from 'claude-code'
 
 import { parseLedger, parsePending, serializeLedger, serializePending, summarize } from '../core/ledger'
-import { activeNotes, isNote, newDoc, parseDoc, pointerText, renderDoc, upsertIndex } from '../core/notes'
+import { isNote, newDoc, parseDoc, pointerText, renderDoc, rulesText, upsertIndex } from '../core/notes'
 import { processTurn } from '../core/pipeline'
 import type { Config, Doc } from '../core/types'
 import type { LedgerEvent, PendingTurn, Status } from '../types'
@@ -16,6 +16,8 @@ const MAX_FAILED = 5
 
 const sessionId = atom({ plugin: 'session-state', key: 'sessionId' } as const, '')
 const file = atom({ plugin: 'session-state', key: 'file' } as const, '')
+// Where the chat started. The session's own directory moves when the person enters a worktree.
+const origin = atom({ plugin: 'session-state', key: 'origin' } as const, '')
 const md = atom({ plugin: 'session-state', key: 'md' } as const, '')
 const events = atom({ plugin: 'session-state', key: 'events' } as const, [] as LedgerEvent[])
 const queue = atom({ plugin: 'session-state', key: 'queue' } as const, [] as PendingTurn[])
@@ -37,6 +39,29 @@ const readText = async ($: EngineInterface, path: string): Promise<string> => {
   }
 }
 
+const findNote = async ($: EngineInterface, dir: string, tail: string): Promise<string | undefined> => {
+  try {
+    return (await $.fs.list(dir)).find(entry => entry.kind === 'file' && entry.name.endsWith(tail))?.name
+  } catch {
+    return undefined
+  }
+}
+
+// The folder of this chat's project first, then every other project: a resumed chat may start elsewhere.
+const findFile = async ($: EngineInterface, root: string, dir: string, tail: string): Promise<string | undefined> => {
+  const here = await findNote($, dir, tail)
+  if (here !== undefined) return `${dir}/${here}`
+  try {
+    for (const entry of await $.fs.list(root)) {
+      const found = entry.kind === 'dir' ? await findNote($, `${root}/${entry.name}`, tail) : undefined
+      if (found !== undefined) return `${root}/${entry.name}/${found}`
+    }
+  } catch {
+    // no folder yet: this session starts it
+  }
+  return undefined
+}
+
 const dayOf = async ($: EngineInterface): Promise<string> => new Date(await $.clock.now()).toISOString().slice(0, 10)
 
 const boot = async ($: EngineInterface, id: string): Promise<string> => {
@@ -46,19 +71,13 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   }
   const home = (await $.env.get('HOME')) ?? ''
   const cwd = await $.session.cwd()
-  const dir = `${home}/.claude/session-state/${projectOf(cwd)}`
-  const tail = `_${id.slice(0, 8)}.md`
-  let name = fileName(await dayOf($), id)
-  try {
-    const found = (await $.fs.list(dir)).find(entry => entry.name.endsWith(tail))
-    if (found !== undefined) name = found.name
-  } catch {
-    // no folder yet: this session starts it
-  }
-  const path = `${dir}/${name}`
+  const root = `${home}/.claude/session-state`
+  const dir = `${root}/${projectOf(cwd)}`
+  const path = (await findFile($, root, dir, `_${id.slice(0, 8)}.md`)) ?? `${dir}/${fileName(await dayOf($), id)}`
   const ledger = parseLedger(await readText($, metricsOf(path)))
   await update($, sessionId, () => id)
   await update($, file, () => path)
+  await update($, origin, () => cwd)
   await update($, md, () => '')
   await update($, events, () => ledger)
   const pending = parsePending(await readText($, pendingOf(path)))
@@ -91,6 +110,7 @@ const writeIndex = async ($: EngineInterface, path: string, doc: Doc): Promise<v
     date: baseOf(path).slice(0, 10),
     title: doc.front.title ?? '',
     active: notes.filter(n => n.status === 'active').length,
+    done: notes.filter(n => n.status === 'done').length,
     superseded: notes.filter(n => n.status === 'superseded').length,
   })
   await $.fs.write(indexPath, next)
@@ -100,12 +120,13 @@ const savePending = async ($: EngineInterface): Promise<void> => {
   await $.fs.write(pendingOf(await read($, file)), serializePending(await read($, queue)))
 }
 
-const isFailure = (e: LedgerEvent): boolean => (e.type === 'gate' ? e.action === 'error' : e.error !== undefined)
+// A failed look at the agent's reply loses no note, so it never asks for a retry.
+const isFailure = (e: LedgerEvent): boolean => (e.type === 'gate' ? e.action === 'error' : e.type === 'extract' && e.error !== undefined)
 
 const handle = async ($: EngineInterface, config: Config, turn: PendingTurn): Promise<void> => {
   const path = await read($, file)
   const id = await read($, sessionId)
-  const cwd = await $.session.cwd()
+  const cwd = (await read($, origin)) || (await $.session.cwd())
   const text = await readText($, path)
   const base = newDoc({ sessionId: id, project: projectOf(cwd), cwd, started: await dayOf($), transcript: transcriptOf(cwd, id) })
   // The file is the truth: read it back each turn so the person's edits stand.
@@ -234,7 +255,12 @@ export const register: Register = (on, options) => {
     const out = await next(e)
     try {
       const path = await ensure($)
-      return { sections: [...out.sections, { id: 'session-state:notes', text: pointerText(path), scope: 'session' as const }] }
+      const sections = [...out.sections, { id: 'session-state:notes', text: pointerText(path), scope: 'session' as const }]
+      if ((await configOf($, options)).pinRules) {
+        const rules = rulesText(parseDoc(await readText($, path)))
+        if (rules !== '') sections.push({ id: 'session-state:rules', text: rules, scope: 'session' as const })
+      }
+      return { sections }
     } catch {
       return out
     }
@@ -275,6 +301,7 @@ export const register: Register = (on, options) => {
     const panel = rows({
       stats,
       active: notes.filter(n => n.status === 'active').length,
+      done: notes.filter(n => n.status === 'done').length,
       superseded: notes.filter(n => n.status === 'superseded').length,
       config,
       status: await read($, status),

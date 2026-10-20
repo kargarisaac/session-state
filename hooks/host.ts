@@ -21,6 +21,7 @@ export async function configOf($: EngineInterface, options: PluginOptions): Prom
     effort,
     maxWords: Math.max(5, Math.round(num(options.maxWords, DEFAULTS.maxWords))),
     auditRate: Math.min(1, Math.max(0, num(options.auditRate, DEFAULTS.auditRate))),
+    pinRules: options.pinRules !== false,
   }
 }
 
@@ -30,10 +31,10 @@ export function hostOf($: EngineInterface, config: Config): Host {
   return {
     now: () => $.clock.now(),
     random: () => Math.random(),
-    complete: async ({ system, prompt }) => {
+    complete: async ({ system, prompt, effort }) => {
       const r = await $.model.complete({
         model: config.haikuModel,
-        effort: config.effort,
+        effort: effort ?? config.effort,
         system,
         prompt,
         maxTokens: 1500,

@@ -1,6 +1,6 @@
 {
   "name": "session-state",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Keeps short notes of what you asked and decided in a long chat, in a session.md the agent can read, with a side panel.",
   "author": {
     "name": "Isaac Kargar"
@@ -72,6 +72,12 @@
       "default": 0,
       "min": 0,
       "max": 1
+    },
+    "pinRules": {
+      "type": "boolean",
+      "title": "Pin your rules in the system prompt",
+      "description": "Put your always/never rules and preferences (up to 8) into the agent's system prompt, so it follows them without reading the file. The prompt changes when a rule is added, so Claude Code re-reads the chat once at that point. Default: on.",
+      "default": true
     },
     "openPanelOnStart": {
       "type": "boolean",

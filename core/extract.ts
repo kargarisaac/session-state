@@ -12,12 +12,14 @@ export const systemPrompt = (maxWords: number): string =>
     'Record only things the USER said that will still matter about 50 turns later: decisions, constraints and requirements, preferences, corrections and reversals, scope limits, always/never/from-now-on rules, and standing requests the agent could drop.',
     'Never record: one-off commands ("run the tests"), questions, acknowledgements, the current step of a task, or anything only the agent said.',
     'The agent text is context. Use it to work out what a short reply like "yes" or "the second one" refers to, and write the note with that detail.',
+    'Name things the way the chat does. Where the user says "the video", "the deck", "it", "this" or "those decisions", write the real file, feature, product or person name from the agent text or the active notes. If the chat gives no name, keep the user\'s own words; never invent a name.',
     `Each note is one sentence of at most ${maxWords} words, clear on its own: what was decided and the one detail that makes it unambiguous. No quotes.`,
-    `"kind" is one of: ${KINDS.join(', ')}. Use "ask" only for a standing request that is not yet done.`,
+    `"kind" is one of: ${KINDS.join(', ')}. "ask" is an action still to be done (including "delete X", "update Y", "send Z"). "decision" is a choice that stays true. "requirement" and "preference" are rules for the rest of the chat. "correction" fixes something the agent got wrong.`,
     '"quote" is an exact, contiguous piece of the USER\'S LATEST MESSAGE that supports the note, copied character for character.',
-    '"supersedes" lists the ids of active notes this note replaces or reverses (numbers, e.g. 2 for M-002), or [].',
-    'Reply with JSON only, no prose: {"title": "<=6 words, only when the current title is (none)", "memories": [{"kind": "...", "text": "...", "quote": "...", "supersedes": []}]}',
-    'If nothing qualifies, reply {"memories": []}.',
+    '"supersedes" lists the ids of active notes this note REPLACES or REVERSES (numbers, e.g. 2 for M-002): the user changed their mind about the same thing, so the old note is no longer true. A note that adds to, narrows or only relates to an earlier one does NOT supersede it; both stay. When unsure, use [].',
+    '"done" lists the ids of active "ask" notes that the agent\'s reply shows are now finished: it says it did them and nothing is left. Never list anything you are unsure about. Usually [].',
+    'Reply with JSON only, no prose: {"title": "<=6 words, only when the current title is (none)", "memories": [{"kind": "...", "text": "...", "quote": "...", "supersedes": []}], "done": []}',
+    'If nothing qualifies, reply {"memories": [], "done": []}.',
   ].join('\n')
 
 export const noteLabel = (id: number): string => `M-${String(id).padStart(3, '0')}`
@@ -52,7 +54,7 @@ export const isQuoteOf = (quote: string, user: string): boolean => {
   return q.length >= 3 && squash(user).includes(q)
 }
 
-export type Extraction = { title: string; memories: Memory[] }
+export type Extraction = { title: string; memories: Memory[]; done: number[] }
 
 const isKind = (v: unknown): v is Kind => typeof v === 'string' && (KINDS as readonly string[]).includes(v)
 
@@ -61,6 +63,8 @@ const idOf = (v: unknown): number | undefined => {
   const m = typeof v === 'string' ? /^M?-?(\d+)$/i.exec(v.trim()) : null
   return m === null ? undefined : Number(m[1])
 }
+
+const idsOf = (v: unknown): number[] => (Array.isArray(v) ? v.map(idOf).filter((n): n is number => n !== undefined) : [])
 
 export const parseExtraction = (text: string): Extraction | { error: string } => {
   const start = text.indexOf('{')
@@ -83,11 +87,51 @@ export const parseExtraction = (text: string): Extraction | { error: string } =>
       kind,
       text: body.replace(/\s+/g, ' ').trim(),
       quote,
-      supersedes: Array.isArray(supersedes) ? supersedes.map(idOf).filter((n): n is number => n !== undefined) : [],
+      supersedes: idsOf(supersedes),
     })
   }
   const title = (json as { title?: unknown }).title
-  return { title: typeof title === 'string' ? title.replace(/\s+/g, ' ').trim() : '', memories }
+  return { title: typeof title === 'string' ? title.replace(/\s+/g, ' ').trim() : '', memories, done: idsOf((json as { done?: unknown }).done) }
+}
+
+// Only a request still to be done can be finished, and only one that exists.
+export const checkDone = (ids: number[], open: Note[]): number[] => {
+  const asks = new Set(open.map(n => n.id))
+  return [...new Set(ids.filter(id => asks.has(id)))]
+}
+
+const CLOSE_ANSWER_CHARS = 4000
+const CLOSE_USER_CHARS = 2000
+
+export const closeSystem = (): string =>
+  [
+    'A user gave a coding agent some requests in a chat. Below are the requests still open and the agent\'s latest reply.',
+    'Say which open requests that reply shows are now finished: the agent says it did them, and nothing of them is left.',
+    'A request that is only started, only planned or only discussed is not finished. When unsure, leave it out.',
+    'Reply with JSON only, no prose: {"done": [ids]}. Use the numbers, e.g. 2 for M-002. If none, {"done": []}.',
+  ].join('\n')
+
+export const closePrompt = (turn: Turn, open: Note[]): string =>
+  [
+    'Open requests:',
+    open.map(n => `${noteLabel(n.id)} ${n.text}`).join('\n'),
+    '',
+    "The user's message:",
+    tidy(turn.user, CLOSE_USER_CHARS),
+    '',
+    "The agent's reply:",
+    tidy(turn.answer, CLOSE_ANSWER_CHARS),
+  ].join('\n')
+
+export const parseClose = (text: string): { done: number[] } | { error: string } => {
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start < 0 || end <= start) return { error: 'no JSON object in the reply' }
+  try {
+    return { done: idsOf((JSON.parse(text.slice(start, end + 1)) as { done?: unknown }).done) }
+  } catch {
+    return { error: 'reply is not valid JSON' }
+  }
 }
 
 export type Checked = { kept: Memory[]; overLong: Memory[]; dropped: string[] }

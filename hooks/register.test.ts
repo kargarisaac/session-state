@@ -20,12 +20,12 @@ const PANE_PROPS = {
 } as never
 
 // An engine whose files live in a map, whose Jev answers `p`, and whose Haiku answers from a script.
-const world = (on: TestOn, p: number, replies: object[]) => {
+const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = () => '/work/demo') => {
   const files = new Map<string, string>()
   const calls = { jev: 0, haiku: 0 }
   mock.env(on, { HOME: '/h', OPENROUTER_API_KEY: 'test-key' })
   on('session.id', () => ({ value: ID }) as never)
-  on('session.cwd', () => ({ value: '/work/demo' }) as never)
+  on('session.cwd', () => ({ value: cwdOf() }) as never)
   on('command.register', () => ({ value: {} }) as never)
   on('session.start', () => ({ cwd: '/work/demo' }) as never)
   on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
@@ -126,4 +126,38 @@ test('the system prompt tells the agent where the notes are, the same text on ev
   expect(section?.scope).toBe('session')
   expect(section?.text).toContain(FILE)
   expect(JSON.stringify(second)).toBe(JSON.stringify(first))
+})
+
+test('the rules the user gave are pinned in the system prompt next to the pointer', async ($, on) => {
+  mock.clock(on, { now: Date.UTC(2026, 9, 17, 8, 0, 0) })
+  const { files } = world(on, 0.95, [])
+  files.set(
+    FILE,
+    '---\nsession_id: x\nnext_id: 3\n---\n# T\n- M-001 · t1 · requirement · Never use Opus as a subagent.\n- M-002 · t2 · ask · Rename the video.\n',
+  )
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  const out = await $.prompt.compose(COMPOSE)
+  const rules = out.sections.find(s => s.id === 'session-state:rules')
+
+  expect(rules?.text).toContain('- Never use Opus as a subagent.')
+  expect(rules?.text.includes('Rename the video')).toBe(false)
+  expect(out.sections.find(s => s.id === 'session-state:notes')?.text).toContain(FILE)
+})
+
+test('entering a worktree mid-chat does not change the project, folder or transcript of the notes', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.UTC(2026, 9, 17, 8, 0, 0) })
+  let cwd = '/work/demo'
+  const { files } = world(on, 0.95, [{ memories: [{ kind: 'decision', text: 'Use SQLite.', quote: 'use SQLite', supersedes: [] }] }], () => cwd)
+
+  await $.session.start({ cwd, surface: 'terminal' } as never)
+  await $.prompt.compose(COMPOSE)
+  cwd = '/work/demo/.local/worktrees'
+  await say($, 'use SQLite', 'ok', 1)
+  await settle(clock, files, f => f.has(FILE))
+
+  const md = files.get(FILE) ?? ''
+  expect(md).toContain('project: demo')
+  expect(md).toContain('cwd: /work/demo\n')
+  expect(md).toContain('/.claude/projects/-work-demo/')
 })

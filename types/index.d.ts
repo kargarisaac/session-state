@@ -24,10 +24,23 @@ export type ExtractEvent = {
   usage: Usage
   kept: number
   dropped: string[]
+  closed?: number
   error?: string
 }
 
-export type LedgerEvent = GateEvent | ExtractEvent
+export type CloseEvent = {
+  type: 'close'
+  at: number
+  turn: number
+  turnId: string
+  model: string
+  ms: number
+  usage: Usage
+  closed: number
+  error?: string
+}
+
+export type LedgerEvent = GateEvent | ExtractEvent | CloseEvent
 
 export type PendingTurn = {
   turn: number
@@ -45,6 +58,7 @@ declare module 'claude-code' {
     'session-state': {
       sessionId: string
       file: string
+      origin: string
       md: string
       events: LedgerEvent[]
       queue: PendingTurn[]
