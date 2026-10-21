@@ -8,10 +8,10 @@ import { archivedTurns, fitLedger, parseLedger, parsePending, serializeLedger, s
 import { activeNotes, newFront, parseOldNotes, pointerText, rulesText, upsertIndex } from '../core/notes'
 import { processTurn } from '../core/pipeline'
 import { emptyState, HISTORY_HEAD, historyBlock, parseState, renderState, seedState } from '../core/state'
-import { appendStep, stepLines } from '../core/steps'
+import { appendStep, hasStep, stepLines } from '../core/steps'
 import { answersOf, continuesFrom, parseTranscript, withAnswers } from '../core/transcript'
 import type { Config, State } from '../core/types'
-import type { LedgerEvent, PendingTurn, Status, Tab } from '../types'
+import type { ExtractEvent, LedgerEvent, PendingTurn, Status, Tab } from '../types'
 import { gateLines, rows } from './format'
 import { configOf, hostOf } from './host'
 import { baseOf, dirOf, eventsOf, folderName, historyOf, pendingOf, projectOf, stateOf, stepsOf, transcriptOf } from './paths'
@@ -221,12 +221,21 @@ const saveEvents = async ($: EngineInterface, add: LedgerEvent[]): Promise<Ledge
 
 const isFailure = (e: LedgerEvent): boolean => e.type === 'extract' && e.error !== undefined
 
+// A turn whose step line is written and whose last run did not fail was recorded before the process stopped (it died
+// between the step line and emptying pending.json). Running it again would add its notes a second time.
+const isRecorded = (stepsMd: string, all: readonly LedgerEvent[], turn: PendingTurn): boolean => {
+  const runs = all.filter((e): e is ExtractEvent => e.type === 'extract' && e.turn === turn.turn && e.turnId === turn.turnId)
+  return runs.length > 0 && runs[runs.length - 1]!.error === undefined && hasStep(stepsMd, turn.turn)
+}
+
 const handle = async ($: EngineInterface, config: Config, turn: PendingTurn): Promise<void> => {
   const folder = await read($, dir)
   const state = loadState(await readText($, stateOf(folder)), await frontOf($))
   const stepsMd = await readText($, stepsOf(folder))
+  const all = await read($, events)
+  if (isRecorded(stepsMd, all, turn)) return
   // A turn read back from the transcript sees only the turns before it, as it would have live.
-  const ledger = (await read($, events)).filter(e => e.type !== 'turn' || e.turn <= turn.turn)
+  const ledger = all.filter(e => e.type !== 'turn' || e.turn <= turn.turn)
 
   const outcome = await processTurn(
     hostOf($, config),

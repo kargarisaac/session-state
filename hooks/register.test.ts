@@ -466,3 +466,41 @@ test('two drains started at once record each queued turn once', async ($, on) =>
   expect((files.get(STEPS) ?? '').split('\n').filter(l => l.startsWith('- t'))).toHaveLength(2)
   expect((files.get(EVENTS) ?? '').match(/"type":"extract"/g)).toHaveLength(2)
 })
+
+const pendingTurn = (n: number, user: string, answer: string) => ({ turn: n, turnId: `t${n}`, user, answer, previousAnswer: '', isAborted: false, facts: { read: [], edited: [], commands: 0, failures: [], commits: [] } })
+const extractRun = (turn: number, error?: string) =>
+  JSON.stringify({ type: 'extract', at: 1, turn, turnId: `t${turn}`, model: 'm', mode: 'extract', ms: 1, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, kept: 1, learned: 0, closed: 0, roles: 0, dropped: [], ...(error === undefined ? {} : { error }) })
+const RECORDED_STATE =
+  '---\nsession_id: abc12345-0000-0000-0000-000000000000\nproject: demo\ncwd: /work/demo\nstarted: 2026-10-17\ntitle: Storage choice\nnext_id: 2\nnext_learning: 1\n---\n# Storage choice\n\n## Decisions and rules\n### M-001 · decision · t1\nUse SQLite for storage.\nWhy: No server to run.\nQuote: "use SQLite"\nSource: t1 · turn t1\n'
+
+test('a queued turn that was fully recorded before the process stopped is not recorded again', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const again = { ...SQLITE, memories: [{ ...SQLITE.memories[0]!, text: 'Storage is SQLite.' }] }
+  const { files, calls } = world(on, 0.95, [again])
+  // The last run wrote everything for turn 1 but died before it emptied pending.json.
+  files.set(STATE, RECORDED_STATE)
+  files.set(STEPS, '# Steps\n- t1 · ✓ · Switched storage to SQLite. · +M-001\n')
+  files.set(EVENTS, `${archived(1, 'Please use SQLite from now on.', 'Done')}\n${extractRun(1)}\n`)
+  files.set(`${FOLDER}/pending.json`, JSON.stringify([pendingTurn(1, 'Please use SQLite from now on.', 'Done')]))
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await settle(clock, files, f => f.get(`${FOLDER}/pending.json`) === '[]')
+
+  expect(calls.haiku).toBe(0)
+  expect(files.get(STATE)).toBe(RECORDED_STATE)
+  expect(files.get(`${FOLDER}/pending.json`)).toBe('[]')
+})
+
+test('a queued turn whose last run failed is recorded when it is picked up again', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, calls } = world(on, 0.95, [SQLITE])
+  files.set(STEPS, '# Steps\n- t1 · ✓ · Asked: Please use SQLite from now on.\n')
+  files.set(EVENTS, `${archived(1, 'Please use SQLite from now on.', 'Done')}\n${extractRun(1, 'haiku: overloaded')}\n`)
+  files.set(`${FOLDER}/pending.json`, JSON.stringify([pendingTurn(1, 'Please use SQLite from now on.', 'Done')]))
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('+M-001'))
+
+  expect(calls.haiku).toBe(1)
+  expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ · Switched storage to SQLite. · +M-001')
+})
