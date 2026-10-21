@@ -1,6 +1,7 @@
 import type { Stats } from '../core/ledger'
 import type { Config } from '../core/types'
 import type { Status } from '../types'
+import { plural } from './view'
 
 export const money = (usd: number): string => {
   if (usd === 0) return '$0'
@@ -31,14 +32,8 @@ export type PanelInput = {
 export const rows = (p: PanelInput): Row[] => {
   const { stats, config } = p
   const haikuIn = stats.haikuUsage.input + stats.haikuUsage.cacheRead + stats.haikuUsage.cacheWrite
-  const state = p.isPaused
-    ? 'paused'
-    : p.status.isBusy
-      ? `recording turn ${p.status.turn}`
-      : 'idle'
-  const list: Row[] = [
-    { label: 'Ledger', value: `${p.asks} open asks · ${p.rules} decisions and rules · ${p.learnings} learnings · ${p.files} files` },
-    { label: 'Turns', value: `${stats.turns} seen · ${stats.passed} passed · ${stats.skipped} skipped` },
+  return [
+    { label: 'Turns', value: `${stats.turns} seen · ${stats.passed} passed the gate · ${stats.skipped} skipped` },
     {
       label: 'Gate',
       value:
@@ -48,7 +43,7 @@ export const rows = (p: PanelInput): Row[] => {
     },
     {
       label: 'Haiku',
-      value: `${config.haikuModel} · via Claude Code · ${stats.summaries} summaries (low) · ${stats.extractions} extractions (${config.effort}) · ${stats.lookups} look-backs · avg ${duration(mean(stats.haikuMs, stats.summaries + stats.extractions))}`,
+      value: `${config.haikuModel} · ${stats.summaries} summaries (low) · ${stats.extractions} extractions (${config.effort}) · ${stats.lookups} look-backs · avg ${duration(mean(stats.haikuMs, stats.summaries + stats.extractions))}`,
     },
     {
       label: 'Saved',
@@ -58,11 +53,16 @@ export const rows = (p: PanelInput): Row[] => {
       label: 'Cost',
       value: `Jev ${money(stats.jevCost)} · Haiku ${kilo(haikuIn)} in, ${kilo(stats.haikuUsage.output)} out ≈ ${money(stats.haikuCost)} (plan usage, not billed)`,
     },
-    { label: 'Status', value: p.status.message === '' ? state : `${state} · ${p.status.message}` },
   ]
-  if (p.failed > 0) list.push({ label: 'Failed', value: `${p.failed} turn${p.failed === 1 ? '' : 's'}; /session-state retry` })
-  return list
 }
 
-export const gateLines = (stats: Stats): string[] =>
-  stats.lastGates.map(g => `t${g.turn}  ${g.p === null ? ' —  ' : `p ${g.p.toFixed(2)}`}  ${g.action}${g.error === undefined ? '' : ` (${g.error})`}`)
+export type Tone = 'success' | 'warning' | 'error' | 'inactive'
+
+// The recorder's state as one coloured line: what it is doing, and what went wrong if anything did.
+export const statusOf = (p: Pick<PanelInput, 'status' | 'isPaused' | 'failed'>): { tone: Tone; text: string } => {
+  const note = p.status.message === '' ? '' : ` · ${p.status.message}`
+  if (p.isPaused) return { tone: 'inactive', text: `Paused${note}` }
+  if (p.status.isBusy) return { tone: 'warning', text: `Recording turn ${p.status.turn}${note}` }
+  if (p.failed > 0) return { tone: 'error', text: `${plural(p.failed, 'turn')} failed; run /session-state retry${note}` }
+  return { tone: 'success', text: `Idle${note}` }
+}

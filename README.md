@@ -26,7 +26,7 @@ No OpenRouter key? Set the `gate` setting to `off` (see Privacy).
 
 Work as usual. Then:
 
-- `/session-state` opens one side panel with three tab buttons at the top: **Steps** (one line per turn), **Ledger** (`state.md`, with a button for `history.md`) and **Stats** (models, counts, cost).
+- `/session-state` opens one side panel with three tabs at the top (press `1`, `2` or `3`, or click): **Steps** (each turn with its outcome, files and the notes it added), **Ledger** (open asks, decisions and rules, learnings and files, colour-coded by kind, with a switch between *Now* and *History*) and **Stats** (recorder status, counts, models, cost and recent gate decisions). Colours come from your Claude Code theme.
 - `/session-state steps | ledger | stats` opens the panel on that tab.
 - `/session-state close | pause | resume | retry | path | digest` closes the panel, stops recording, resumes, re-runs failed turns, prints the folder, or prints what the agent gets after a compaction.
 - `/session-state rebuild` moves the chat's ledger files to `before-rebuild/` (`before-rebuild-2/` and on, for the next rebuilds) and reads the whole chat again from Claude Code's transcript. It leaves the files alone when the transcript has no turns to read, or when the chat continues one that was compacted under a new session id (its transcript starts after the compaction, so the earlier turns are only in the ledger).

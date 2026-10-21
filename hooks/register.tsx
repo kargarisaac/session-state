@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, PluginOptions, Register } from 'claude-code'
+import type { EngineInterface, PluginOptions, Register, ThemeKey } from 'claude-code'
 
 import { digestText } from '../core/digest'
 import { addToolCall, emptyFacts } from '../core/facts'
@@ -7,14 +7,15 @@ import { fileIndex, rankFiles } from '../core/files'
 import { archivedTurns, fitLedger, parseLedger, parsePending, serializeLedger, serializePending, summarize, turnRecord } from '../core/ledger'
 import { activeNotes, newFront, parseOldNotes, pointerText, rulesText, upsertIndex } from '../core/notes'
 import { processTurn } from '../core/pipeline'
-import { emptyState, HISTORY_HEAD, historyBlock, parseState, renderState, seedState } from '../core/state'
+import { emptyState, HISTORY_HEAD, historyBlock, learnLabel, noteLabel, parseState, renderState, seedState } from '../core/state'
 import { appendStep, hasStep, lastStep, stepLines } from '../core/steps'
 import { answersOf, continuesFrom, hasMessage, parseTranscript, withAnswers } from '../core/transcript'
-import type { Config, State, Turn } from '../core/types'
+import type { Config, Kind, State, Turn } from '../core/types'
 import type { ExtractEvent, LedgerEvent, PendingTurn, Status, Tab } from '../types'
-import { gateLines, rows } from './format'
+import { rows, statusOf } from './format'
 import { configOf, hostOf } from './host'
 import { baseOf, dirOf, eventsOf, folderName, historyOf, pendingOf, projectOf, stateOf, stepsOf, transcriptOf } from './paths'
+import { gateTone, parseStep, rule } from './view'
 
 const PANE = 'session-state'
 const TITLE = 'Session ledger'
@@ -23,6 +24,9 @@ const PANEL_STEPS = 40
 // A chat met mid-way (new install, upgrade, resume) is read back from its transcript, up to this many turns.
 const BACKFILL_MAX = 100
 const TABS: Tab[] = ['steps', 'ledger', 'stats']
+const TAB_LABEL: Record<Tab, string> = { steps: 'Steps', ledger: 'Ledger', stats: 'Stats' }
+// What kind of note it is, as a theme colour, so a glance tells an ask from a rule.
+const KIND_TONE: Record<Kind, ThemeKey> = { ask: 'warning', decision: 'permission', requirement: 'suggestion', preference: 'remember', correction: 'error' }
 
 const sessionId = atom({ plugin: 'session-state', key: 'sessionId' } as const, '')
 // This session's ledger folder: <project>/<date>_<id8>.
@@ -643,84 +647,233 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button, Markdown } = $.ui.resolve(e)
     const shown = await read($, tab)
     const folder = await read($, dir)
+    const columns = e.props.bodyColumns
+    const state = loadState(await read($, md), {})
+    const active = activeNotes(state)
+    const learnings = state.learnings.filter(l => l.status === 'active')
+    const stepList = stepLines(await read($, steps))
+    const count: Record<Tab, string> = {
+      steps: stepList.length === 0 ? '' : String(stepList.length),
+      ledger: active.length + learnings.length === 0 ? '' : String(active.length + learnings.length),
+      stats: '',
+    }
+
+    // A tab is a pressable label: the shown one is bold and underlined in the accent colour, the others recede.
     const tabs = (
-      <Box>
-        {TABS.map(t => (
-          <Button key={t} label={t[0]!.toUpperCase() + t.slice(1)} variant={t === shown ? 'primary' : 'secondary'} onPress={() => void update($, tab, () => t)} />
-        ))}
+      <Box flexDirection="column" marginBottom={1}>
+        <Box gap={2}>
+          {TABS.map((t, i) => (
+            <Button key={t} plain hotkey={String(i + 1)} label={TAB_LABEL[t]} onPress={() => void update($, tab, () => t)}>
+              <Text color={t === shown ? 'claude' : 'inactive'} bold={t === shown} underline={t === shown}>
+                {TAB_LABEL[t]}
+              </Text>
+              {count[t] !== '' && <Text dimColor>{` ${count[t]}`}</Text>}
+            </Button>
+          ))}
+        </Box>
+        <Text dimColor>{rule(columns)}</Text>
+      </Box>
+    )
+
+    // A section title with the number of things under it.
+    const heading = (title: string, n?: number) => (
+      <Box marginTop={1}>
+        <Text bold color="subtle">
+          {title.toUpperCase()}
+        </Text>
+        {n !== undefined && <Text dimColor>{`  ${n}`}</Text>}
       </Box>
     )
 
     if (shown === 'steps') {
-      const lines = stepLines(await read($, steps))
       const s = await read($, status)
       const queued = (await read($, queue)).length
+      const views = stepList.slice(-PANEL_STEPS).map(parseStep)
+      const wide = Math.max(20, columns - 10)
       return (
         <Box flexDirection="column">
           {tabs}
-          {lines.length === 0 && <Text dimColor>No steps yet: one line appears after each turn.</Text>}
-          {lines.length > PANEL_STEPS && <Text dimColor>{`${lines.length - PANEL_STEPS} earlier steps in steps.md`}</Text>}
-          {lines.slice(-PANEL_STEPS).map(line => (
-            <Text key={line}>{line.slice(2)}</Text>
-          ))}
-          {s.isBusy && <Text dimColor>{`recording t${s.turn}…${queued > 1 ? ` (${queued - 1} more queued)` : ''}`}</Text>}
+          {stepList.length === 0 && (
+            <Box flexDirection="column">
+              <Text>No steps yet.</Text>
+              <Text dimColor>After each turn one line appears here: what was done, which files changed, and the notes it added.</Text>
+            </Box>
+          )}
+          {stepList.length > PANEL_STEPS && <Text dimColor>{`… ${stepList.length - PANEL_STEPS} earlier steps in steps.md`}</Text>}
+          {views.map((v, i) =>
+            v === undefined ? (
+              <Text key={i} dimColor>
+                {stepList.slice(-PANEL_STEPS)[i]!.slice(2)}
+              </Text>
+            ) : (
+              <Box key={v.turn} marginBottom={1}>
+                <Box width={6}>
+                  <Text dimColor>{`t${v.turn}`}</Text>
+                </Box>
+                <Box width={2}>
+                  <Text color={v.mark === '✓' ? 'success' : v.mark === '✗' ? 'error' : 'inactive'} bold>
+                    {v.mark}
+                  </Text>
+                </Box>
+                <Box flexDirection="column" width={wide}>
+                  <Text dimColor={v.mark === '◌'}>{v.text}</Text>
+                  {(v.facts.length > 0 || v.added.length > 0 || v.done.length > 0) && (
+                    <Text>
+                      {v.facts.length > 0 && <Text dimColor>{v.facts.join(' · ')}</Text>}
+                      {v.facts.length > 0 && v.added.length + v.done.length > 0 && <Text dimColor>{'  '}</Text>}
+                      {v.added.map(id => (
+                        <Text key={id} color={id.startsWith('L') ? 'warning' : 'success'}>{`+${id} `}</Text>
+                      ))}
+                      {v.done.map(id => (
+                        <Text key={id} color="merged">{`✓ ${id} `}</Text>
+                      ))}
+                    </Text>
+                  )}
+                </Box>
+              </Box>
+            ),
+          )}
+          {s.isBusy && (
+            <Text color="warning">{`◐ recording t${s.turn}…${queued > 1 ? `  ${queued - 1} more waiting` : ''}`}</Text>
+          )}
         </Box>
       )
     }
 
     if (shown === 'ledger') {
       const isHistory = await read($, isHistoryShown)
-      // The front matter is for tools and the agent; the panel shows the ledger itself.
-      const text = (isHistory ? await read($, history) : await read($, md)).replace(/^---\n[\s\S]*?\n---\n?/, '')
+      const switcher = (
+        <Box gap={2}>
+          {[false, true].map(isTarget => (
+            <Button key={isTarget ? 'history' : 'state'} plain label={isTarget ? 'History' : 'Now'} onPress={() => void update($, isHistoryShown, () => isTarget)}>
+              <Text color={isTarget === isHistory ? 'claude' : 'inactive'} bold={isTarget === isHistory}>
+                {isTarget ? 'History' : 'Now'}
+              </Text>
+            </Button>
+          ))}
+          <Text dimColor>{isHistory ? 'replaced or finished' : 'true right now'}</Text>
+        </Box>
+      )
+      if (isHistory) {
+        // The front matter and the file's own heading are for tools; the panel shows the entries.
+        const text = (await read($, history)).replace(/^---\n[\s\S]*?\n---\n?/, '').replace(HISTORY_HEAD, '').trim()
+        return (
+          <Box flexDirection="column">
+            {tabs}
+            {switcher}
+            <Box marginTop={1} flexDirection="column">
+              <Markdown text={text === '' ? '_Nothing has been replaced or finished yet._' : text} />
+            </Box>
+          </Box>
+        )
+      }
+      const asks = active.filter(n => n.kind === 'ask')
+      const rules = active.filter(n => n.kind !== 'ask')
+      const roles = Object.entries(state.roles)
+      const wide = Math.max(20, columns - 4)
+      // One entry: its id and kind on a line, then what it says, why, and the user's own words.
+      const entry = (id: string, kind: string, tone: ThemeKey, turn: number, text: string, why: string, quote: string) => (
+        <Box key={id} flexDirection="column" marginBottom={1} width={wide}>
+          <Text>
+            <Text color={tone} bold>{`${kind} `}</Text>
+            <Text dimColor>{`${id} · t${turn}`}</Text>
+          </Text>
+          <Text>{text}</Text>
+          {why !== '' && <Text dimColor>{why}</Text>}
+          {quote !== '' && <Text dimColor italic>{quote}</Text>}
+        </Box>
+      )
       return (
         <Box flexDirection="column">
           {tabs}
-          <Box>
-            <Button key="history" label={isHistory ? 'Show state' : 'Show history'} onPress={() => void update($, isHistoryShown, h => !h)} />
-          </Box>
-          <Markdown text={text === '' ? (isHistory ? '_Nothing replaced or finished yet._' : '_No ledger yet._') : text} />
+          {switcher}
+          {active.length + learnings.length === 0 && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text>No ledger yet.</Text>
+              <Text dimColor>Asks, decisions, rules and what failed collect here as the chat goes on.</Text>
+            </Box>
+          )}
+          {asks.length > 0 && heading('Open asks', asks.length)}
+          {asks.map(n => entry(noteLabel(n.id), 'ask', KIND_TONE.ask, n.turn, n.text, n.why, n.quote === '' ? '' : `“${n.quote.replace(/^"|"$/g, '')}”`))}
+          {rules.length > 0 && heading('Decisions and rules', rules.length)}
+          {rules.map(n => entry(noteLabel(n.id), n.kind, KIND_TONE[n.kind], n.turn, n.text, n.why, n.quote === '' ? '' : `“${n.quote.replace(/^"|"$/g, '')}”`))}
+          {learnings.length > 0 && heading('Learned the hard way', learnings.length)}
+          {learnings.map(l => entry(learnLabel(l.id), l.kind, l.kind === 'failed' ? 'error' : 'warning', l.turn, l.text, l.why, l.evidence))}
+          {roles.length > 0 && heading('Files', roles.length)}
+          {roles.map(([path, role]) => (
+            <Box key={path} flexDirection="column" width={wide}>
+              <Text wrap="truncate-middle">{path}</Text>
+              <Text dimColor>{role}</Text>
+            </Box>
+          ))}
+          {state.own.some(line => line.trim() !== '') && heading('Your notes')}
+          {state.own.some(line => line.trim() !== '') && <Markdown text={state.own.filter((l, i) => i > 0 || !l.startsWith('## ')).join('\n').trim()} />}
         </Box>
       )
     }
 
     const config = await configOf($, options)
-    const state = loadState(await read($, md), {})
-    const active = activeNotes(state)
     const ledger = await read($, events)
     const stats = summarize(ledger)
-    const panel = rows({
+    const failures = (await read($, failed)).length
+    const input = {
       stats,
       asks: active.filter(n => n.kind === 'ask').length,
       rules: active.filter(n => n.kind !== 'ask').length,
-      learnings: state.learnings.filter(l => l.status === 'active').length,
+      learnings: learnings.length,
       files: fileIndex(archivedTurns(ledger)).length,
       config,
       status: await read($, status),
       isPaused: await read($, isPaused),
-      failed: (await read($, failed)).length,
-    })
-    const recent = gateLines(stats)
+      failed: failures,
+    }
+    const now = statusOf(input)
+    const chips: [number, string][] = [
+      [input.asks, input.asks === 1 ? 'open ask' : 'open asks'],
+      [input.rules, input.rules === 1 ? 'decision or rule' : 'decisions and rules'],
+      [input.learnings, input.learnings === 1 ? 'learning' : 'learnings'],
+      [input.files, input.files === 1 ? 'file' : 'files'],
+    ]
     return (
       <Box flexDirection="column">
         {tabs}
-        {panel.map(r => (
-          <Text key={r.label}>
-            <Text bold>{r.label.padEnd(9)}</Text>
-            {r.value}
+        <Text color={now.tone}>{`● ${now.text}`}</Text>
+        {heading('Ledger')}
+        <Box columnGap={3} flexWrap="wrap">
+          {chips.map(([n, label]) => (
+            <Text key={label}>
+              <Text bold>{`${n} `}</Text>
+              <Text dimColor>{label}</Text>
+            </Text>
+          ))}
+        </Box>
+        {heading('Pipeline')}
+        {rows(input).map(r => (
+          <Box key={r.label}>
+            <Box width={8}>
+              <Text dimColor>{r.label}</Text>
+            </Box>
+            <Box width={Math.max(20, columns - 10)}>
+              <Text>{r.value}</Text>
+            </Box>
+          </Box>
+        ))}
+        {stats.lastGates.length > 0 && heading('Recent gate decisions')}
+        {stats.lastGates.map(g => (
+          <Text key={g.turn}>
+            <Text dimColor>{`t${g.turn}`.padEnd(5)}</Text>
+            <Text>{(g.p === null ? '—' : `p ${g.p.toFixed(2)}`).padEnd(8)}</Text>
+            <Text color={gateTone(g.action)}>{g.action}</Text>
+            {g.error !== undefined && <Text color="error">{`  ${g.error}`}</Text>}
           </Text>
         ))}
-        {recent.length > 0 && <Text dimColor>Recent gate decisions</Text>}
-        {recent.map(line => (
-          <Text key={line} dimColor>
-            {line}
-          </Text>
-        ))}
+        {heading('Folder')}
         <Text dimColor wrap="truncate-middle">
           {folder === '' ? 'No folder yet' : folder}
         </Text>
-        <Box>
+        <Box marginTop={1} gap={2}>
           <Button key="copy" label="Copy path" onPress={() => void $.ui.copy({ text: folder, surface: e.surface })} />
-          <Button key="pause" label={(await read($, isPaused)) ? 'Resume' : 'Pause'} onPress={() => void update($, isPaused, p => !p)} />
+          <Button key="pause" label={input.isPaused ? 'Resume' : 'Pause'} onPress={() => void update($, isPaused, p => !p)} />
         </Box>
       </Box>
     )

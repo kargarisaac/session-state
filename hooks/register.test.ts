@@ -140,6 +140,10 @@ const settle = async (clock: { advance: (ms: number) => Promise<void> }, files: 
 const textOf = async (ui: { findAll: (q: { type: string }) => Promise<{ text?: string }[]> }) =>
   (await ui.findAll({ type: 'Text' })).map(t => t.text ?? '').join('\n')
 
+// Everything the pane shows as words: the Text nodes and the Markdown ones.
+const bodyOf = async (ui: Parameters<typeof textOf>[0] & { findAll: (q: never) => Promise<unknown[]> }) =>
+  `${await textOf(ui)}\n${JSON.stringify(await ui.findAll({ type: 'Markdown' } as never))}`
+
 const mountPane = ($: TestDollar) =>
   $.ui.mount({ plugin: 'session-state', surface: 'terminal', component: 'Pane', requestId: 'session-state', props: PANE_PROPS } as never)
 
@@ -171,16 +175,16 @@ test('a decision above the gate lands in the session folder: state, step, archiv
   expect(calls.efforts).toEqual(['high'])
 
   const ui = await mountPane($)
-  expect(await textOf(ui)).toContain('t1 · ✓ · Switched storage to SQLite.')
+  expect(await textOf(ui)).toContain('Switched storage to SQLite.')
   await $.command.run({ command: 'session-state', args: 'ledger' } as never)
   await ui.redraw()
-  const ledger = JSON.stringify(await ui.findAll({ type: 'Markdown' } as never))
+  const ledger = await bodyOf(ui)
   expect(ledger).toContain('Use SQLite for storage.')
   expect(ledger.includes('session_id:')).toBe(false)
   await $.command.run({ command: 'session-state', args: 'stats' } as never)
   await ui.redraw()
   const stats = await textOf(ui)
-  expect(stats).toContain('0 open asks · 1 decisions and rules')
+  expect(stats).toContain('1 decision or rule')
   expect(stats).toContain('jev-1.14')
 })
 
@@ -695,7 +699,7 @@ test('a child that restarts keeps its own ledger and does not copy its parent ag
   await ui.redraw()
 
   expect(files.get(STATE)).toBe(own)
-  expect(JSON.stringify(await ui.findAll({ type: 'Markdown' } as never))).toContain('Keep answers short.')
+  expect(await bodyOf(ui)).toContain('Keep answers short.')
 })
 
 const SHORT = {
@@ -789,7 +793,7 @@ test('closing the panel and opening it again shows the same ledger, with or with
   expect(after.steps).toContain('Switched storage to SQLite.')
   expect(after.steps).toContain('Ran the tests.')
   expect(after.ledger).toContain('Use SQLite for storage.')
-  expect(after.stats).toContain('1 decisions and rules')
+  expect(after.stats).toContain('1 decision or rule')
 })
 
 const POSTGRES = {
@@ -797,7 +801,7 @@ const POSTGRES = {
   memories: [{ kind: 'decision', text: 'Use Postgres for storage.', why: 'Needs concurrent writers.', context: '', quote: 'use Postgres', refers_to: [], supersedes: [1] }],
 }
 
-const markdownOf = async (ui: Awaited<ReturnType<typeof mountPane>>) => JSON.stringify(await ui.findAll({ type: 'Markdown' } as never))
+const markdownOf = async (ui: Awaited<ReturnType<typeof mountPane>>) => bodyOf(ui)
 
 test('the history view follows the turns while the panel stays open', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
@@ -809,7 +813,7 @@ test('the history view follows the turns while the panel stays open', async ($, 
   await $.command.run({ command: 'session-state', args: 'ledger' } as never)
   const ui = await mountPane($)
   await ui.press({ key: 'history' })
-  expect(await markdownOf(ui)).toContain('Nothing replaced or finished yet.')
+  expect(await markdownOf(ui)).toContain('Nothing has been replaced or finished yet.')
 
   await say($, 'Actually use Postgres instead.', 'Moved.', 2)
   await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t2'))
@@ -828,7 +832,7 @@ test('reopening the panel on the ledger tab shows the ledger, not the history it
   await $.command.run({ command: 'session-state', args: 'ledger' } as never)
   const first = await mountPane($)
   await first.press({ key: 'history' })
-  expect(await markdownOf(first)).toContain('Nothing replaced or finished yet.')
+  expect(await markdownOf(first)).toContain('Nothing has been replaced or finished yet.')
   await $.command.run({ command: 'session-state', args: 'close' } as never)
   await first.unmount()
 
@@ -853,9 +857,9 @@ test('a panel drawn before the session has started shows the folder as soon as i
   expect(await textOf(ui)).toContain('No steps yet')
   await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
 
-  expect(await textOf(ui)).toContain('t1 · ✓ · Chose SQLite. · +M-001')
+  expect(await textOf(ui)).toContain('Chose SQLite.')
   await $.command.run({ command: 'session-state', args: 'stats' } as never)
-  expect(await textOf(ui)).toContain('0 open asks · 1 decisions and rules')
+  expect(await textOf(ui)).toContain('1 decision or rule')
   await $.command.run({ command: 'session-state', args: 'ledger' } as never)
   expect(await markdownOf(ui)).toContain('Use SQLite for storage.')
 })
@@ -1014,7 +1018,7 @@ test('a turn that Haiku failed twice shows in the panel, and retry records its n
   await say($, 'Please use SQLite from now on.', 'Switched.', 1)
   await settle(clock, files, f => f.has(STEPS))
   await $.command.run({ command: 'session-state', args: 'stats' } as never)
-  expect(await textOf(ui)).toContain('1 turn; /session-state retry')
+  expect(await textOf(ui)).toContain('1 turn failed; run /session-state retry')
   expect(files.get(STATE) ?? '').not.toContain('Use SQLite for storage.')
 
   const out = await $.command.run({ command: 'session-state', args: 'retry' } as never)
@@ -1022,7 +1026,7 @@ test('a turn that Haiku failed twice shows in the panel, and retry records its n
   await settle(clock, files, f => (f.get(STATE) ?? '').includes('Use SQLite for storage.'))
 
   expect(await textOf(ui)).not.toContain('/session-state retry')
-  expect(await textOf(ui)).toContain('1 decisions and rules')
+  expect(await textOf(ui)).toContain('1 decision or rule')
 })
 
 test('after a rebuild the open panel shows the rebuilt steps and ledger, not the old ones', async ($, on) => {
@@ -1040,7 +1044,7 @@ test('after a rebuild the open panel shows the rebuilt steps and ledger, not the
   await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t2'))
 
   const steps = await textOf(ui)
-  expect(steps).toContain('t2 · ✓ · Ran the tests.')
+  expect(steps).toContain('Ran the tests.')
   expect(steps.includes('Switched storage to SQLite.')).toBe(false)
 })
 
@@ -1050,16 +1054,16 @@ test('pausing from the panel stops recording and says so; resuming records again
   await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
   await $.command.run({ command: 'session-state', args: 'stats' } as never)
   const ui = await mountPane($)
-  expect(await textOf(ui)).toContain('idle')
+  expect(await textOf(ui)).toContain('Idle')
 
   await ui.press({ key: 'pause' })
-  expect(await textOf(ui)).toContain('paused')
+  expect(await textOf(ui)).toContain('Paused')
   await say($, 'run the tests', 'All pass.', 1)
   await clock.advance(50)
   expect(files.has(STEPS)).toBe(false)
 
   await ui.press({ key: 'pause' })
-  expect(await textOf(ui)).toContain('idle')
+  expect(await textOf(ui)).toContain('Idle')
   await say($, 'run the linter', 'Clean.', 2)
   await settle(clock, files, f => f.has(STEPS))
   expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ ')
@@ -1633,7 +1637,7 @@ test('a /clear while Haiku is still working does not put the old turn into the n
   // The old chat did not lose its turn: it is still queued in its own folder for when that chat is opened again.
   expect(JSON.parse(files.get(`${FOLDER}/pending.json`) ?? '[]').map((t: { turn: number }) => t.turn)).toEqual([1])
   const ui = await mountPane($)
-  expect(await textOf(ui)).toContain('t1 · ✓ · Answered.')
+  expect(await textOf(ui)).toContain('Answered.')
   expect((await textOf(ui)).includes('Switched storage')).toBe(false)
 })
 
@@ -1997,7 +2001,7 @@ for (let seed = 1; seed <= 24; seed++) {
     await clock.advance(3000)
     await $.command.run({ command: 'session-state', args: 'steps' } as never)
     await ui.redraw()
-    const shown = (await textOf(ui)).split('\n').filter(line => /^t\d+ · /.test(line)).map(line => `- ${line.split(' · ')[0]}`)
+    const shown = (await textOf(ui)).split('\n').filter(line => /^t\d+$/.test(line)).map(line => `- ${line}`)
     expect({ log: log.join(' '), shown }).toEqual({ log: log.join(' '), shown: everyTurn })
   })
 }
