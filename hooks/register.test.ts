@@ -32,6 +32,8 @@ const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = (
   const refuse = { path: '' }
   // `hold.until` makes the next Haiku call wait for it, as a slow answer would.
   const hold = { until: undefined as Promise<void> | undefined }
+  // `hang.jev` makes OpenRouter take the request and never answer it.
+  const hang = { jev: false }
   const calls = { jev: 0, haiku: 0, efforts: [] as string[], contexts: [] as (readonly string[] | undefined)[] }
   mock.env(on, { HOME: '/h', OPENROUTER_API_KEY: 'test-key' })
   on('session.id', () => ({ value: idOf() }) as never)
@@ -75,6 +77,7 @@ const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = (
   })
   on('http.fetch', () => {
     calls.jev += 1
+    if (hang.jev) return new Promise(() => {}) as never
     const body = { model: 'typesafe/jev-1.14-x', answers: { important: { type: 'noul', noul: p } }, usage: { input_tokens: 356, output_tokens: 20, cost: 0.000015 } }
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } } as never
   })
@@ -88,7 +91,7 @@ const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = (
     if ('fail' in next) return { value: { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: USAGE } } as never
     return { value: { isAnswered: true, text: JSON.stringify(next), usage: USAGE } } as never
   })
-  return { files, calls, refuse, hold }
+  return { files, calls, refuse, hold, hang }
 }
 
 const say = async ($: TestDollar, text: string, answer: string, n: number) => {
@@ -545,4 +548,25 @@ test('a /clear while Haiku is still working does not put the old turn into the n
   const ui = await mountPane($)
   expect(await textOf(ui)).toContain('t1 · ✓ · Answered.')
   expect((await textOf(ui)).includes('Switched storage')).toBe(false)
+})
+
+test('a Jev request that never answers does not hold the queue: the gate fails and the turn is still recorded', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, calls, hang } = world(on, 0.95, [SQLITE, { step: { text: 'Ran the tests.', outcome: 'ok' }, memories: [] }])
+  hang.jev = true
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await say($, 'run the tests', 'All pass.', 2)
+  for (let i = 0; i < 300 && !(files.get(STEPS) ?? '').includes('- t2'); i++) await clock.advance(200)
+
+  const steps = files.get(STEPS) ?? ''
+  expect(steps).toContain('- t1 · ✓ · Switched storage to SQLite. · +M-001')
+  expect(steps).toContain('- t2 · ✓ · Ran the tests.')
+  const events = files.get(EVENTS) ?? ''
+  expect(events).toContain('"action":"error"')
+  expect(events).toContain('jev did not answer')
+  // A turn the gate could not judge goes to extraction, as with any other gate error.
+  expect(events).toContain('"mode":"extract"')
+  expect(calls.haiku).toBe(2)
 })

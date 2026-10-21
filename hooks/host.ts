@@ -8,6 +8,9 @@ const num = (v: unknown, fallback: number): number => (typeof v === 'number' && 
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 
+// $.http.fetch has no timeout of its own, and the queue waits for the gate: Jev answers in well under a second.
+const JEV_TIMEOUT_MS = 20_000
+
 export async function configOf($: EngineInterface, options: PluginOptions): Promise<Config> {
   const fromOptions = text(options.openrouterKey, '')
   const jevKey = fromOptions !== '' ? fromOptions : ((await $.env.get('OPENROUTER_API_KEY')) ?? '')
@@ -50,8 +53,16 @@ export function hostOf($: EngineInterface, config: Config): Host {
       return { isOk: false, reason: r.reason === 'api-error' ? `api-error ${r.status ?? 'no response'} ${r.error}` : r.reason, usage }
     },
     post: async (url, headers, body) => {
-      const r = await $.http.fetch(url, { method: 'POST', headers, body })
-      return { status: r.status, text: r.text }
+      const stop = new AbortController()
+      const late = $.clock.sleep(JEV_TIMEOUT_MS, { signal: stop.signal }).then(() => {
+        throw new Error(`jev did not answer within ${JEV_TIMEOUT_MS / 1000} s`)
+      })
+      try {
+        const r = await Promise.race([$.http.fetch(url, { method: 'POST', headers, body }), late])
+        return { status: r.status, text: r.text }
+      } finally {
+        stop.abort()
+      }
     },
   }
 }
