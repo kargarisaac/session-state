@@ -185,7 +185,8 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   await update($, previousAnswer, () => pending.at(-1)?.answer ?? archive.at(-1)?.answer ?? '')
   await update($, facts, () => emptyFacts())
   await update($, turns, () => Math.max(0, ...archive.map(r => r.turn), ...pending.map(t => t.turn)))
-  await update($, status, () => ({ isBusy: false, turn: 0, message: '' }))
+  // A turn may be being written up right now; isBusy is the drain's to clear.
+  await update($, status, s => ({ ...s, message: '' }))
   await update($, isCompacted, () => false)
   return folder
 }
@@ -234,7 +235,9 @@ const saveEvents = async ($: EngineInterface, add: LedgerEvent[]): Promise<Ledge
 
 const isFailure = (e: LedgerEvent): boolean => e.type === 'extract' && e.error !== undefined
 
-const handle = async ($: EngineInterface, config: Config, turn: PendingTurn): Promise<void> => {
+// Says whether the turn is done. It is not when the chat moved to a new session id while Haiku was writing it up:
+// the turn is then handled again, in the folder of the session that has it queued.
+const handle = async ($: EngineInterface, config: Config, turn: PendingTurn): Promise<boolean> => {
   const folder = await read($, dir)
   const state = loadState(await readText($, stateOf(folder)), await frontOf($))
   const stepsMd = await readText($, stepsOf(folder))
@@ -247,6 +250,7 @@ const handle = async ($: EngineInterface, config: Config, turn: PendingTurn): Pr
     { state, steps: stepLines(stepsMd), archive: archivedTurns(ledger), files: ranked(state, ledger, turn.turn) },
     turn,
   )
+  if ((await read($, dir)) !== folder) return false
 
   await saveEvents($, outcome.events)
   const out = renderState(outcome.state, ranked(outcome.state, ledger, turn.turn))
@@ -262,6 +266,7 @@ const handle = async ($: EngineInterface, config: Config, turn: PendingTurn): Pr
   await update($, steps, () => nextSteps)
   await writeIndex($, folder, outcome.state, stepLines(nextSteps).length).catch(quiet)
   if (outcome.events.some(isFailure)) await update($, failed, list => [...list, turn].slice(-MAX_FAILED))
+  return true
 }
 
 // Runs outside any hook's budget, one turn at a time, so the next prompt is never held up.
@@ -273,14 +278,15 @@ const drain = async ($: EngineInterface, config: Config): Promise<void> => {
       const next = (await read($, queue))[0]
       if (next === undefined) break
       await update($, status, s => ({ ...s, turn: next.turn }))
+      let isDone = true
       try {
-        await handle($, config, next)
+        isDone = await handle($, config, next)
         await update($, status, s => ({ ...s, message: '' }))
       } catch (err) {
         await update($, status, s => ({ ...s, message: `error: ${String(err).slice(0, 140)}` }))
         await update($, failed, list => [...list, next].slice(-MAX_FAILED))
       }
-      await update($, queue, list => list.slice(1))
+      if (isDone) await update($, queue, list => list.slice(1))
       await savePending($).catch(quiet)
     }
   } finally {

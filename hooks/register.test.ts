@@ -403,6 +403,33 @@ const compactToNewId = async ($: TestDollar, files: Map<string, string>, moveTo:
   files.set(`${PROJECT}/${CHILD}.jsonl`, boundary('last-of-old'))
 }
 
+// Haiku takes a while to write up a turn; the chat can move to a new session id while it does.
+for (const ms of [2000, 5000]) {
+  test(`a turn still being written up when the chat moves to a new session id lands in the new ledger once (${ms} ms)`, async ($, on) => {
+    const clock = mock.clock(on, { now: NOW })
+    let id = ID
+    let latency = 0
+    const first = { step: { text: 'Ran the tests.', outcome: 'ok' }, memories: [] }
+    const { files, calls } = world(on, 0.95, [first, SQLITE, SQLITE], () => '/work/demo', () => id, () => clock.sleep(latency))
+
+    await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+    await say($, 'run the tests', 'All pass.', 1)
+    await settle(clock, files, f => f.has(STEPS))
+    latency = ms
+    await say($, 'Please use SQLite from now on.', 'Switched.', 2)
+    await clock.advance(500)
+    await compactToNewId($, files, () => (id = CHILD))
+    await $.prompt.submit({ text: 'what next?' } as never)
+    await clock.advance(30000)
+
+    const decisions = (files.get(`${CHILD_DIR}/state.md`) ?? '').split('\n').filter(l => l.startsWith('### M-'))
+    expect(decisions).toEqual(['### M-001 · decision · t2'])
+    expect(turnsOf(files.get(`${CHILD_DIR}/steps.md`))).toEqual(['- t1', '- t2'])
+    expect((files.get(`${CHILD_DIR}/events.jsonl`) ?? '').split('\n').filter(l => l.includes('"type":"extract"') && l.includes('"turn":2'))).toHaveLength(1)
+    expect(calls.haiku).toBeGreaterThanOrEqual(2)
+  })
+}
+
 test('rebuild leaves the ledger alone when the transcript has no turns to rebuild it from', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   const { files } = world(on, 0.1, [{ step: { text: 'Ran the tests.', outcome: 'ok' }, memories: [] }])
