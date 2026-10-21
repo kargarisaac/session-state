@@ -30,6 +30,8 @@ const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = (
   const files = new Map<string, string>()
   // `refuse` names a path that every write fails for; the engine itself refuses any write over 4 MiB.
   const refuse = { path: '' }
+  // `hold.until` makes the next Haiku call wait for it, as a slow answer would.
+  const hold = { until: undefined as Promise<void> | undefined }
   const calls = { jev: 0, haiku: 0, efforts: [] as string[], contexts: [] as (readonly string[] | undefined)[] }
   mock.env(on, { HOME: '/h', OPENROUTER_API_KEY: 'test-key' })
   on('session.id', () => ({ value: idOf() }) as never)
@@ -76,14 +78,17 @@ const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = (
     const body = { model: 'typesafe/jev-1.14-x', answers: { important: { type: 'noul', noul: p } }, usage: { input_tokens: 356, output_tokens: 20, cost: 0.000015 } }
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } } as never
   })
-  on('model.complete', (_$, e) => {
+  on('model.complete', async (_$, e) => {
     calls.efforts.push(String((e as { effort?: string }).effort))
     const next = replies[calls.haiku++] ?? { step: { text: 'Answered.', outcome: 'ok' }, memories: [] }
+    const wait = hold.until
+    hold.until = undefined
+    if (wait !== undefined) await wait
     // A reply of { fail: true } is Haiku being overloaded.
     if ('fail' in next) return { value: { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: USAGE } } as never
     return { value: { isAnswered: true, text: JSON.stringify(next), usage: USAGE } } as never
   })
-  return { files, calls, refuse }
+  return { files, calls, refuse, hold }
 }
 
 const say = async ($: TestDollar, text: string, answer: string, n: number) => {
@@ -503,4 +508,41 @@ test('a queued turn whose last run failed is recorded when it is picked up again
 
   expect(calls.haiku).toBe(1)
   expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ · Switched storage to SQLite. · +M-001')
+})
+
+test('a /clear while Haiku is still working does not put the old turn into the new chat', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const NEW_ID = 'bbbb2222-0000-0000-0000-000000000000'
+  const NEW_FOLDER = `${ROOT}/demo/2026-10-17_bbbb2222`
+  let id = ID
+  const { files, hold } = world(on, 0.95, [SQLITE], () => '/work/demo', () => id)
+  let release = () => {}
+  hold.until = new Promise<void>(resolve => {
+    release = resolve
+  })
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await clock.advance(1)
+  // /clear: the exit gives up waiting, and the process goes on under a new session id.
+  const exit = $.session.end({ reason: 'clear', sessionId: ID, resume: { id: ID } } as never)
+  for (let i = 0; i < 45; i++) await clock.advance(200)
+  await exit
+  id = NEW_ID
+  await say($, 'run the tests', 'All pass.', 1)
+  await settle(clock, files, f => f.has(`${NEW_FOLDER}/steps.md`))
+  release()
+  for (let i = 0; i < 10; i++) await clock.advance(10)
+
+  const steps = files.get(`${NEW_FOLDER}/steps.md`) ?? ''
+  expect(steps.split('\n').filter(l => l.startsWith('- t'))).toEqual(['- t1 · ✓ · Answered.'])
+  const events = files.get(`${NEW_FOLDER}/events.jsonl`) ?? ''
+  expect(events.includes('Please use SQLite')).toBe(false)
+  expect((events.match(/"type":"extract"/g) ?? []).length).toBe(1)
+  expect(files.get(`${NEW_FOLDER}/state.md`) ?? '').not.toContain('SQLite')
+  // The old chat did not lose its turn: it is still queued in its own folder for when that chat is opened again.
+  expect(JSON.parse(files.get(`${FOLDER}/pending.json`) ?? '[]').map((t: { turn: number }) => t.turn)).toEqual([1])
+  const ui = await mountPane($)
+  expect(await textOf(ui)).toContain('t1 · ✓ · Answered.')
+  expect((await textOf(ui)).includes('Switched storage')).toBe(false)
 })

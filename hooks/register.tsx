@@ -228,8 +228,10 @@ const isRecorded = (stepsMd: string, all: readonly LedgerEvent[], turn: PendingT
   return runs.length > 0 && runs[runs.length - 1]!.error === undefined && hasStep(stepsMd, turn.turn)
 }
 
-const handle = async ($: EngineInterface, config: Config, turn: PendingTurn): Promise<void> => {
-  const folder = await read($, dir)
+// A /clear or a resume moves the process to another chat while a turn is still being recorded.
+const isHere = async ($: EngineInterface, folder: string): Promise<boolean> => (await read($, dir)) === folder
+
+const handle = async ($: EngineInterface, config: Config, turn: PendingTurn, folder: string): Promise<void> => {
   const state = loadState(await readText($, stateOf(folder)), await frontOf($))
   const stepsMd = await readText($, stepsOf(folder))
   const all = await read($, events)
@@ -244,6 +246,9 @@ const handle = async ($: EngineInterface, config: Config, turn: PendingTurn): Pr
     turn,
   )
 
+  // The chat changed while Haiku worked: the result belongs to a folder whose atoms are no longer loaded. Nothing is
+  // written; the turn stays in that folder's pending.json for when the chat is opened again.
+  if (!(await isHere($, folder))) return
   // The state and the step line matter more than the archive: a failed write of it must not stop them.
   await saveEvents($, outcome.events).catch(quiet)
   const out = renderState(outcome.state, ranked(outcome.state, ledger, turn.turn))
@@ -271,23 +276,28 @@ const drain = async ($: EngineInterface, config: Config): Promise<void> => {
     return isClaimed ? { ...s, isBusy: true } : s
   })
   if (!isClaimed) return
+  const folder = await read($, dir)
   try {
     for (;;) {
+      // The queue in the atoms is the loaded chat's; once the chat has changed, the rest of this drain is not its.
+      if (!(await isHere($, folder))) break
       const next = (await read($, queue))[0]
       if (next === undefined) break
       await update($, status, s => ({ ...s, turn: next.turn }))
       try {
-        await handle($, config, next)
-        await update($, status, s => ({ ...s, message: '' }))
+        await handle($, config, next, folder)
+        if (await isHere($, folder)) await update($, status, s => ({ ...s, message: '' }))
       } catch (err) {
+        if (!(await isHere($, folder))) break
         await update($, status, s => ({ ...s, message: `error: ${String(err).slice(0, 140)}` }))
         await update($, failed, list => [...list, next].slice(-MAX_FAILED))
       }
+      if (!(await isHere($, folder))) break
       await update($, queue, list => list.slice(1))
       await savePending($).catch(quiet)
     }
   } finally {
-    await update($, status, s => ({ ...s, isBusy: false }))
+    if (await isHere($, folder)) await update($, status, s => ({ ...s, isBusy: false }))
   }
 }
 
