@@ -485,6 +485,28 @@ test('the ledger of a parent whose transcript is too big to read is still carrie
   expect(turnsOf(files.get(`${CHILD_DIR}/steps.md`))).toEqual(['- t1'])
 })
 
+test('a parent too big to read is found by grep when the process that booted the new session did not see the compaction', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.1, [], () => '/work/demo', () => CHILD)
+  files.set(`${OLD_DIR}/state.md`, ledgerOf('old00001-0000', 'Use SQLite for storage.'))
+  files.set(`${OLD_DIR}/steps.md`, '# Steps\n- t1 · ✓ · Chose SQLite. · +M-001\n')
+  files.set(`${PROJECT}/old00001-0000.jsonl`, `${last('last-of-old')}\n${'x'.repeat(READ_CAP)}`)
+  files.set(`${PROJECT}/${CHILD}.jsonl`, boundary('last-of-old'))
+  const runs: string[][] = []
+  // Stands for grep: it finds the message in the file it is given.
+  on('process.run', (_$, e) => {
+    runs.push([...e.argv])
+    const found = (files.get(e.argv.at(-1)!) ?? '').includes('"uuid":"last-of-old"')
+    return { value: { exitCode: found ? 0 : 1, stdout: '', stderr: '' } } as never
+  })
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+
+  expect(files.get(`${CHILD_DIR}/state.md`) ?? '').toContain('Use SQLite for storage.')
+  expect(runs).toHaveLength(1)
+  expect(runs[0]![0]).toBe('grep')
+})
+
 test('a chat compacted inside a worktree continues in the project folder it started in', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   let cwd = '/work/demo'

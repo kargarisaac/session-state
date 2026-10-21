@@ -96,11 +96,33 @@ const loadState = (text: string, front: Record<string, string>): State => {
 const LEDGER_FILES = [stateOf, stepsOf, historyOf, eventsOf, pendingOf]
 const MAX_PARENTS = 12
 
-// The transcript a ledger folder names in its state.md; empty when it names none, or $.fs.read cannot read it
-// (it rejects a file over 4 MiB, as a long chat's is).
-const transcriptIn = async ($: EngineInterface, home: string, folder: string): Promise<string> => {
+// The transcript a ledger folder names in its state.md.
+const transcriptPathIn = async ($: EngineInterface, home: string, folder: string): Promise<string | undefined> => {
   const path = /^transcript:\s*(.+)$/m.exec(await readText($, stateOf(folder)))?.[1]?.trim()
-  return path === undefined ? '' : readText($, path.replace(/^~/, home))
+  return path?.replace(/^~/, home)
+}
+
+// The text of a transcript; empty when there is none, or $.fs.read cannot read it (it rejects a file over 4 MiB, as
+// a long chat's is).
+const transcriptIn = async ($: EngineInterface, home: string, folder: string): Promise<string> => {
+  const path = await transcriptPathIn($, home, folder)
+  return path === undefined ? '' : readText($, path)
+}
+
+// Whether a ledger folder's transcript holds a message. One too big to read is searched by grep, which is run by
+// its argument vector (no shell) on that one file, with an id that has nothing but letters, digits and dashes.
+const holdsMessage = async ($: EngineInterface, home: string, folder: string, uuid: string): Promise<boolean> => {
+  const path = await transcriptPathIn($, home, folder)
+  if (path === undefined) return false
+  const text = await readText($, path)
+  if (text !== '') return hasMessage(text, uuid)
+  if (!/^[A-Za-z0-9-]{1,64}$/.test(uuid)) return false
+  try {
+    const found = await $.process.run(['grep', '-q', '-E', '-e', `"uuid"[[:space:]]*:[[:space:]]*"${uuid}"`, path])
+    return found.exitCode === 0
+  } catch {
+    return false
+  }
 }
 
 // The ledger folder of the chat this one continues. In the process that compacted it, that is the folder it was
@@ -121,7 +143,7 @@ const parentFolder = async ($: EngineInterface, here: string, folder: string, ho
     if (stat !== undefined) written.push({ path, at: stat.mtimeMs })
   }
   for (const { path } of written.sort((a, b) => b.at - a.at).slice(0, MAX_PARENTS)) {
-    if (hasMessage(await transcriptIn($, home, path), uuid)) return path
+    if (await holdsMessage($, home, path, uuid)) return path
   }
   return undefined
 }

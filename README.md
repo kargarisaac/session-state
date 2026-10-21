@@ -123,6 +123,7 @@ And your rules: the active `requirement` and `preference` notes (the newest 8). 
 
 - With `gate: jev`, each turn's message, answer and the end of the previous answer (keys and tokens redacted, text capped) go to OpenRouter and TypeSafe in the US.
 - With `gate: off`, nothing leaves Claude Code; Haiku extracts on every turn and uses more plan quota.
+- To find the old ledger of a chat that Claude Code continued under a new session id, the mod searches the old chat's transcript for one message id. A transcript over 4 MiB is too big for the mod to read, so it runs `grep -q` on that one file (by argument vector, no shell, nothing leaves your machine).
 - `events.jsonl` keeps each turn's text (redacted, clipped) on your disk, so later turns can still read it after a compaction.
 - `prompt.compose` hooks do not run in organization-managed installs: there the agent is not told about the ledger, but the files and panel still work.
 - The mod API is early access and may change between Claude Code versions.
