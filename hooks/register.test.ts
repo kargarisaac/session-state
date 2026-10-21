@@ -617,3 +617,36 @@ test('after a reload loses the loop that was recording, the queue is picked up a
   expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ ')
   expect(await textOf(ui)).not.toContain('recording t1')
 })
+
+test('a turn that ends while the last one is being saved keeps both in the archive', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, holds } = world(on, 0.1, [])
+  // The first write of the archive after `isArmed` waits, as one that takes longer than a neighbour's does.
+  let isArmed = false
+  let isHeld = false
+  let release = () => {}
+  on('state.set', { plugin: 'session-state', key: 'events' }, async (_$, e, next) => {
+    if (isArmed && !isHeld) {
+      isHeld = true
+      await new Promise<void>(resolve => (release = resolve))
+    }
+    return next(e)
+  })
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  let releaseHaiku = () => {}
+  holds.haiku = new Promise<void>(resolve => (releaseHaiku = resolve))
+  await say($, 'run the tests', 'All pass.', 1)
+  await clock.settle()
+  isArmed = true
+  releaseHaiku()
+  await clock.settle()
+  expect(isHeld).toBe(true)
+
+  await say($, 'and the linter', 'Clean.', 2)
+  release()
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t2'))
+
+  const turns = (files.get(EVENTS) ?? '').split('\n').filter(l => l.includes('"type":"turn"')).map(l => (JSON.parse(l) as { turn: number }).turn)
+  expect(turns).toEqual([1, 2])
+})

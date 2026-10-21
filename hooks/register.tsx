@@ -219,8 +219,9 @@ const savePending = async ($: EngineInterface): Promise<void> => {
 }
 
 const saveEvents = async ($: EngineInterface, add: LedgerEvent[]): Promise<LedgerEvent[]> => {
-  const all = [...(await read($, events)), ...add]
-  await update($, events, () => all)
+  // The new events are added to what the atom holds when the write lands: a turn that ends while the last one is
+  // being saved adds its record to the same list.
+  const all = await update($, events, list => [...list, ...add])
   await $.fs.write(eventsOf(await read($, dir)), serializeLedger(all))
   return all
 }
