@@ -29,8 +29,9 @@ const NOW = Date.UTC(2026, 9, 17, 8, 0, 0)
 const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = () => '/work/demo', idOf: () => string = () => ID) => {
   const files = new Map<string, string>()
   const calls = { jev: 0, haiku: 0, efforts: [] as string[], contexts: [] as (readonly string[] | undefined)[] }
-  // A read of a path waits for its hold and then answers what the file held when it was asked; Haiku waits for its hold.
-  const holds = { reads: new Map<string, Promise<void>>(), haiku: undefined as Promise<void> | undefined }
+  // A read of a path waits for its hold and then answers what the file held when it was asked; Haiku waits for its
+  // hold, and fails its next `fails` calls.
+  const holds = { reads: new Map<string, Promise<void>>(), haiku: undefined as Promise<void> | undefined, fails: 0 }
   mock.env(on, { HOME: '/h', OPENROUTER_API_KEY: 'test-key' })
   on('session.id', () => ({ value: idOf() }) as never)
   on('session.cwd', () => ({ value: cwdOf() }) as never)
@@ -84,6 +85,10 @@ const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = (
   on('model.complete', async (_$, e) => {
     calls.efforts.push(String((e as { effort?: string }).effort))
     await holds.haiku
+    if (holds.fails > 0) {
+      holds.fails -= 1
+      return { value: { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: USAGE } } as never
+    }
     const next = replies[calls.haiku++] ?? { step: { text: 'Answered.', outcome: 'ok' }, memories: [] }
     return { value: { isAnswered: true, text: JSON.stringify(next), usage: USAGE } } as never
   })
@@ -649,4 +654,65 @@ test('a turn that ends while the last one is being saved keeps both in the archi
 
   const turns = (files.get(EVENTS) ?? '').split('\n').filter(l => l.includes('"type":"turn"')).map(l => (JSON.parse(l) as { turn: number }).turn)
   expect(turns).toEqual([1, 2])
+})
+
+test('a turn that Haiku failed twice shows in the panel, and retry records its notes', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, holds } = world(on, 0.95, [SQLITE])
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  const ui = await mountPane($)
+  holds.fails = 2
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  await $.command.run({ command: 'session-state', args: 'stats' } as never)
+  expect(await textOf(ui)).toContain('1 turn; /session-state retry')
+  expect(files.get(STATE) ?? '').not.toContain('Use SQLite for storage.')
+
+  const out = await $.command.run({ command: 'session-state', args: 'retry' } as never)
+  expect(JSON.stringify(out)).toContain('Retrying 1 turn.')
+  await settle(clock, files, f => (f.get(STATE) ?? '').includes('Use SQLite for storage.'))
+
+  expect(await textOf(ui)).not.toContain('/session-state retry')
+  expect(await textOf(ui)).toContain('1 decisions and rules')
+})
+
+test('after a rebuild the open panel shows the rebuilt steps and ledger, not the old ones', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.1, [SQLITE, { step: { text: 'Picked a store.', outcome: 'ok' }, memories: [] }, { step: { text: 'Ran the tests.', outcome: 'ok' }, memories: [] }])
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  const ui = await mountPane($)
+  expect(await textOf(ui)).toContain('Switched storage to SQLite.')
+
+  files.set(TRANSCRIPT, [typed('u1', 'pick a store'), replied('SQLite.'), typed('u2', 'run the tests'), replied('All pass.')].join('\n'))
+  await $.command.run({ command: 'session-state', args: 'rebuild' } as never)
+  expect(await textOf(ui)).toContain('No steps yet')
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t2'))
+
+  const steps = await textOf(ui)
+  expect(steps).toContain('t2 · ✓ · Ran the tests.')
+  expect(steps.includes('Switched storage to SQLite.')).toBe(false)
+})
+
+test('pausing from the panel stops recording and says so; resuming records again', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.1, [])
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await $.command.run({ command: 'session-state', args: 'stats' } as never)
+  const ui = await mountPane($)
+  expect(await textOf(ui)).toContain('idle')
+
+  await ui.press({ key: 'pause' })
+  expect(await textOf(ui)).toContain('paused')
+  await say($, 'run the tests', 'All pass.', 1)
+  await clock.advance(50)
+  expect(files.has(STEPS)).toBe(false)
+
+  await ui.press({ key: 'pause' })
+  expect(await textOf(ui)).toContain('idle')
+  await say($, 'run the linter', 'Clean.', 2)
+  await settle(clock, files, f => f.has(STEPS))
+  expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ ')
 })
