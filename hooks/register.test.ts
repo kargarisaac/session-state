@@ -1827,3 +1827,22 @@ test('a turn whose recording is cut across by a compaction is not dropped from t
 
   expect(turnsOf(files.get(`${CHILD_DIR}/steps.md`))).toEqual(['- t1'])
 })
+
+test('rebuild leaves a session that continues a compacted chat alone: its transcript starts after the compaction', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.1, [{ step: { text: 'Wrote the docs.', outcome: 'ok' }, memories: [] }])
+  files.set(`${OLD_DIR}/state.md`, ledgerOf('old00001-0000', 'Use SQLite for storage.'))
+  files.set(`${OLD_DIR}/steps.md`, '# Steps\n- t1 · ✓ · Chose SQLite. · +M-001\n- t2 · ✓ · Ran the tests.\n')
+  files.set(`${PROJECT}/old00001-0000.jsonl`, last('last-of-old'))
+  files.set(TRANSCRIPT, [boundary('last-of-old'), typed('u9', 'write the docs'), replied('Done.')].join('\n'))
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t3'))
+
+  const out = await $.command.run({ command: 'session-state', args: 'rebuild' } as never)
+  await clock.advance(1000)
+
+  expect(JSON.stringify(out)).toContain('The ledger is unchanged')
+  expect(turnsOf(files.get(STEPS))).toEqual(['- t1', '- t2', '- t3'])
+  expect(files.get(STATE) ?? '').toContain('Use SQLite for storage.')
+  expect(files.has(`${FOLDER}/before-rebuild/steps.md`)).toBe(false)
+})

@@ -590,6 +590,12 @@ export const register: Register = (on, options) => {
       const transcript = await readText($, ((await frontOf($)).transcript ?? '').replace(/^~/, home))
       // Nothing is set aside unless the transcript has turns to rebuild the ledger from.
       if (pastTurns(transcript).length === 0) return { text: 'No earlier turns in the transcript to rebuild from. The ledger is unchanged.' }
+      // A chat Claude Code continued under a new session id has a transcript that starts after the compaction: the
+      // turns before it, and the notes they gave, are only in the ledger it was given.
+      const parent = continuesFrom(transcript)
+      if (parent !== undefined && !hasMessage(transcript, parent)) {
+        return { text: 'This chat continues one that was compacted, and its transcript starts after the compaction, so a rebuild would lose the earlier part of the ledger. The ledger is unchanged.' }
+      }
       // The current files move to before-rebuild/, then the next boot reads the chat back from its transcript.
       for (const path of [stateOf(folder), stepsOf(folder), historyOf(folder), eventsOf(folder), pendingOf(folder)]) {
         const text = await readText($, path)
