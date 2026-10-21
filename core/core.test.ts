@@ -225,6 +225,15 @@ test('memory checks drop invented quotes, over-long notes and duplicates, and ti
   expect(checked.dropped.length).toBe(2)
 })
 
+test('a quote or evidence copied from the redacted text Haiku was shown still matches, and no secret is stored', async () => {
+  const user = 'use this key sk-or-v1-abcdef1234567890abcdef for prod and always use SQLite'
+  const checked = checkMemories([memory('Use the given key in prod.', 'use this key [redacted key] for prod')], user, [], 15, 5)
+  expect(checked.kept.map(m => m.quote)).toEqual(['use this key [redacted key] for prod'])
+  const answer = 'The call failed: key sk-or-v1-abcdef1234567890abcdef rejected by the server.'
+  const learned = checkLearnings([{ kind: 'failed', text: 'The key was rejected.', why: '', evidence: 'key [redacted key] rejected by the server', replaces: [] }], answer, withFacts({}), [])
+  expect(learned.kept.length).toBe(1)
+})
+
 test('a learning must cite the reply or a failed command; a role only fits a file edited this turn', async () => {
   const facts = withFacts({ edited: [`${CWD}/core/a.ts`], failures: [{ command: 'bun x', error: 'ENOENT: no such file' }] })
   const learned = checkLearnings(
