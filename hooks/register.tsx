@@ -338,18 +338,25 @@ export const register: Register = (on, options) => {
     const kind = e.origin?.kind
     const isTyped = kind === undefined || kind === 'composer' || kind === 'bridge' || kind === 'sdk'
     if (!isTyped || e.command !== undefined || e.isMeta === true || e.text.trim() === '' || (await read($, isPaused))) return next(e)
+    let digest = ''
     try {
       await ensure($)
       await update($, pendingUser, p => (p === '' ? e.text : `${p}\n\n${e.text}`))
       if (await read($, isCompacted)) {
+        digest = await digestOf($)
         await update($, isCompacted, () => false)
-        const digest = await digestOf($)
-        return next({ ...e, context: [...(e.context ?? []), digest] })
       }
     } catch {
       // never block a prompt
     }
-    return next(e)
+    const out = await next(digest === '' ? e : { ...e, context: [...(e.context ?? []), digest] })
+    if (out.drop !== undefined) {
+      // Dropped beneath: the agent never saw it. It is not something the person asked, and the next typed
+      // prompt carries the digest.
+      await update($, pendingUser, p => (p === e.text ? '' : p.endsWith(`\n\n${e.text}`) ? p.slice(0, -(e.text.length + 2)) : p)).catch(quiet)
+      if (digest !== '') await update($, isCompacted, () => true).catch(quiet)
+    }
+    return out
   })
 
   on('turn.start', async ($, e, next) => {

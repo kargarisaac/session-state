@@ -28,7 +28,7 @@ const NOW = Date.UTC(2026, 9, 17, 8, 0, 0)
 // An engine whose files live in a map, whose Jev answers `p`, and whose Haiku answers from a script.
 const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = () => '/work/demo', idOf: () => string = () => ID) => {
   const files = new Map<string, string>()
-  const calls = { jev: 0, haiku: 0, efforts: [] as string[], contexts: [] as (readonly string[] | undefined)[] }
+  const calls = { jev: 0, haiku: 0, efforts: [] as string[], contexts: [] as (readonly string[] | undefined)[], isDropping: false }
   mock.env(on, { HOME: '/h', OPENROUTER_API_KEY: 'test-key' })
   on('session.id', () => ({ value: idOf() }) as never)
   on('session.cwd', () => ({ value: cwdOf() }) as never)
@@ -36,7 +36,7 @@ const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = (
   on('session.start', () => ({ cwd: '/work/demo' }) as never)
   on('prompt.submit', (_$, e) => {
     calls.contexts.push(e.context)
-    return { text: e.text } as never
+    return (calls.isDropping ? { drop: 'blocked' } : { text: e.text }) as never
   })
   on('turn.start', (_$, e) => ({ turnId: e.turnId }) as never)
   on('turn.complete', () => ({ text: '' }) as never)
@@ -434,6 +434,32 @@ test('a turn that a compaction moved to a new session id is still recorded', asy
   await settle(clock, files, f => (f.get(`${NEW_FOLDER}/steps.md`) ?? '').includes('- t2'))
 
   expect(files.get(`${NEW_FOLDER}/steps.md`) ?? '').toContain('- t2')
+})
+
+test('a typed prompt that something beneath drops does not use up the digest', async ($, on) => {
+  const { calls } = await recorded($, on)
+  await $.session.compact(COMPACT)
+  calls.isDropping = true
+  const dropped = await $.prompt.submit({ text: 'what next?' } as never)
+  calls.isDropping = false
+  await $.prompt.submit({ text: 'what next, again?' } as never)
+
+  expect(dropped.drop).toBe('blocked')
+  expect(digestOn(calls.contexts)).toContain('The chat was just compacted.')
+})
+
+test('a typed prompt that something beneath drops is not recorded as something the person asked', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, calls } = world(on, 0.1, [])
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  calls.isDropping = true
+  await $.prompt.submit({ text: 'my password is hunter2, remember it' } as never)
+  calls.isDropping = false
+  await say($, 'run the tests', 'All pass.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+
+  expect(files.get(EVENTS) ?? '').toContain('run the tests')
+  expect((files.get(EVENTS) ?? '').includes('hunter2')).toBe(false)
 })
 
 // ---- what the system prompt carries
