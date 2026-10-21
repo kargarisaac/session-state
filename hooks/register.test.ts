@@ -403,6 +403,83 @@ const compactToNewId = async ($: TestDollar, files: Map<string, string>, moveTo:
   files.set(`${PROJECT}/${CHILD}.jsonl`, boundary('last-of-old'))
 }
 
+test('after a compaction that moved the chat to a new session id, the next prompt still carries the digest', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  let id = ID
+  const { files, calls } = world(on, 0.95, [SQLITE], () => '/work/demo', () => id)
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  await compactToNewId($, files, () => (id = CHILD))
+  await $.prompt.submit({ text: 'what next?' } as never)
+  await $.prompt.submit({ text: 'and then?' } as never)
+
+  const [digest, after] = calls.contexts.slice(-2)
+  expect(digest?.[0]).toContain('The chat was just compacted.')
+  expect(digest?.[0]).toContain('M-001 (t1) Use SQLite for storage.')
+  expect(digest?.[0]).toContain(`Full ledger: ${CHILD_DIR}/state.md`)
+  expect(after ?? []).toEqual([])
+})
+
+test('a turn that is running when the compaction moves the chat to a new session id is still recorded', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  let id = ID
+  const { files } = world(on, 0.1, [{ step: { text: 'Ran the tests.', outcome: 'ok' }, memories: [] }, { step: { text: 'Fixed the parser.', outcome: 'ok' }, memories: [] }], () => '/work/demo', () => id)
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'run the tests', 'All pass.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  await $.prompt.submit({ text: 'fix the parser' } as never)
+  await $.turn.start({ text: 'fix the parser', turnId: 't2' } as never)
+  await $.tool.call({ tool: 'Edit', file_path: '/work/demo/core/parse.ts', old_string: 'a', new_string: 'b', tool_use_id: 'u1' } as never)
+  await compactToNewId($, files, () => (id = CHILD))
+  // The next request of the same turn composes the system prompt under the new id.
+  await $.prompt.compose(COMPOSE)
+  await $.turn.complete({ turnId: 't2', answer: 'Fixed.', durationMs: 10, isAborted: false } as never)
+  await settle(clock, files, f => (f.get(`${CHILD_DIR}/steps.md`) ?? '').includes('- t2'))
+
+  const steps = files.get(`${CHILD_DIR}/steps.md`) ?? ''
+  expect(turnsOf(steps)).toEqual(['- t1', '- t2'])
+  expect(steps).toContain('Fixed the parser. · edited core/parse.ts')
+  expect(files.get(`${CHILD_DIR}/events.jsonl`) ?? '').toContain('"user":"fix the parser"')
+})
+
+test('the ledger of a parent whose transcript is too big to read is still carried to the new session id', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  let id = ID
+  const { files } = world(on, 0.95, [SQLITE], () => '/work/demo', () => id)
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  await compactToNewId($, files, () => (id = CHILD), `${last('last-of-old')}\n${'x'.repeat(READ_CAP)}`)
+  await $.prompt.compose(COMPOSE)
+
+  expect(files.get(`${CHILD_DIR}/state.md`) ?? '').toContain('Use SQLite for storage.')
+  expect(turnsOf(files.get(`${CHILD_DIR}/steps.md`))).toEqual(['- t1'])
+})
+
+test('a chat compacted inside a worktree continues in the project folder it started in', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  let cwd = '/work/demo'
+  let id = ID
+  const { files } = world(on, 0.95, [SQLITE, { step: { text: 'Wrote the docs.', outcome: 'ok' }, memories: [] }], () => cwd, () => id)
+
+  await $.session.start({ cwd, surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  cwd = '/work/demo/.local/worktrees'
+  await compactToNewId($, files, () => (id = CHILD))
+  await say($, 'write the docs', 'Done.', 2)
+  await settle(clock, files, f => (f.get(`${CHILD_DIR}/steps.md`) ?? '').includes('- t2'))
+
+  const md = files.get(`${CHILD_DIR}/state.md`) ?? ''
+  expect(md).toContain('Use SQLite for storage.')
+  expect(md).toContain(`transcript: ~/.claude/projects/-work-demo/${CHILD}.jsonl`)
+  expect(turnsOf(files.get(`${CHILD_DIR}/steps.md`))).toEqual(['- t1', '- t2'])
+})
+
 test('a second child of the same parent copies the parent, not its sibling', async ($, on) => {
   mock.clock(on, { now: NOW })
   const { files, written } = world(on, 0.1, [])
@@ -467,6 +544,40 @@ for (const ms of [2000, 5000]) {
     expect(calls.haiku).toBeGreaterThanOrEqual(2)
   })
 }
+
+test('a /clear after a compaction starts an empty ledger and carries no digest', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  let id = ID
+  const { files, calls } = world(on, 0.95, [SQLITE], () => '/work/demo', () => id)
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  await $.session.compact({ trigger: 'auto', messages: SUMMARY } as never)
+  await $.session.end({ reason: 'clear', sessionId: ID, resume: { id: ID } } as never)
+  id = CHILD
+  await $.prompt.submit({ text: 'a fresh start' } as never)
+
+  expect(calls.contexts.at(-1) ?? []).toEqual([])
+  expect(files.get(`${CHILD_DIR}/state.md`) ?? '').toBe('')
+})
+
+test('resuming an unrelated chat after a compaction does not take the ledger of the chat before it', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  let id = ID
+  const { files, calls } = world(on, 0.95, [SQLITE], () => '/work/demo', () => id)
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  await $.session.compact({ trigger: 'auto', messages: SUMMARY } as never)
+  id = CHILD
+  files.set(`${PROJECT}/${CHILD}.jsonl`, [typed('r1', 'an old question'), replied('An old answer.')].join('\n'))
+  await $.prompt.submit({ text: 'carry on' } as never)
+
+  expect(files.get(`${CHILD_DIR}/state.md`) ?? '').toBe('')
+  expect(calls.contexts.at(-1) ?? []).toEqual([])
+})
 
 test('rebuild leaves the ledger alone when the transcript has no turns to rebuild it from', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })

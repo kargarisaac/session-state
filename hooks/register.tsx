@@ -102,9 +102,16 @@ const transcriptIn = async ($: EngineInterface, home: string, folder: string): P
   return path === undefined ? '' : readText($, path.replace(/^~/, home))
 }
 
-// The ledger folder of the chat this one continues, found by the last message the new transcript points back to,
-// among the folders whose ledgers were written last.
-const parentFolder = async ($: EngineInterface, here: string, folder: string, home: string, uuid: string): Promise<string | undefined> => {
+// The ledger folder of the chat this one continues. In the process that compacted it, that is the folder it was
+// recording into, whatever the size of its transcript. Otherwise it is found by the last message the new transcript
+// points back to, among the folders whose ledgers were written last.
+const parentFolder = async ($: EngineInterface, here: string, folder: string, home: string, uuid: string | undefined, previous: string): Promise<string | undefined> => {
+  // A transcript that cannot be read cannot disagree.
+  if (previous !== '' && previous !== folder) {
+    const text = await transcriptIn($, home, previous)
+    if (uuid === undefined || text === '' || hasMessage(text, uuid)) return previous
+  }
+  if (uuid === undefined) return undefined
   const written: { path: string; at: number }[] = []
   for (const entry of await listOf($, here)) {
     const path = `${here}/${entry.name}`
@@ -119,12 +126,12 @@ const parentFolder = async ($: EngineInterface, here: string, folder: string, ho
 }
 
 // A compaction that moved the chat to a new session id keeps its ledger: the old files are copied over, for this
-// session to carry on from. The old folder stays as it was.
-const inherit = async ($: EngineInterface, here: string, folder: string, home: string, transcript: string): Promise<void> => {
+// session to carry on from. The old folder stays as it was. Says whether there was a parent.
+const inherit = async ($: EngineInterface, here: string, folder: string, home: string, transcript: string, previous: string): Promise<boolean> => {
   const uuid = continuesFrom(transcript)
-  if (uuid === undefined) return
-  const parent = await parentFolder($, here, folder, home, uuid)
-  if (parent === undefined) return
+  // A transcript that has messages and no boundary is a chat of its own, not the continuation of the one before it.
+  const parent = await parentFolder($, here, folder, home, uuid, transcript === '' || uuid !== undefined ? previous : '')
+  if (parent === undefined) return false
   const front = await frontOf($)
   for (const pathOf of LEDGER_FILES) {
     const text = await readText($, pathOf(parent))
@@ -132,6 +139,7 @@ const inherit = async ($: EngineInterface, here: string, folder: string, home: s
     const own = pathOf === stateOf ? text.replace(/^(session_id|transcript|resume):.*$/gm, (_, key: string) => `${key}: ${front[key]}`) : text
     await $.fs.write(pathOf(folder), own).catch(quiet)
   }
+  return true
 }
 
 // The turns of a transcript that are over: the last one is left out while its reply is still being written.
@@ -146,8 +154,12 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
     const known = await read($, dir)
     if (known !== '') return known
   }
+  // What this process was recording until now. When that session compacted, this one is its continuation, and it
+  // started in the same place, even if the person has since moved into a worktree.
+  const before = { dir: await read($, dir), origin: await read($, origin), isCompacted: await read($, isCompacted) }
+  const previous = before.isCompacted ? before.dir : ''
   const home = (await $.env.get('HOME')) ?? ''
-  const cwd = await $.session.cwd()
+  const cwd = previous !== '' && before.origin !== '' ? before.origin : await $.session.cwd()
   const root = `${home}/.claude/session-state`
   const here = `${root}/${projectOf(cwd)}`
   const id8 = `_${id.slice(0, 8)}`
@@ -157,7 +169,7 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   await update($, sessionId, () => id)
   await update($, dir, () => folder)
   await update($, origin, () => cwd)
-  if (found === undefined) await inherit($, here, folder, home, transcript)
+  const isContinued = found === undefined && (await inherit($, here, folder, home, transcript, previous))
 
   let ledger = parseLedger(await readText($, eventsOf(folder)))
   let pending = parsePending(await readText($, pendingOf(folder)))
@@ -193,14 +205,14 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   await update($, steps, () => stepsMd)
   await update($, events, () => ledger)
   await update($, queue, () => pending)
-  await update($, failed, () => [])
-  await update($, pendingUser, () => '')
+  // pendingUser and facts are not reset: a turn that is running now ends under this id, and they are its.
+  if (!isContinued) await update($, failed, () => [])
   await update($, previousAnswer, () => pending.at(-1)?.answer ?? archive.at(-1)?.answer ?? '')
-  await update($, facts, () => emptyFacts())
   await update($, turns, () => Math.max(0, ...archive.map(r => r.turn), ...pending.map(t => t.turn)))
   // A turn may be being written up right now; isBusy is the drain's to clear.
   await update($, status, s => ({ ...s, message: '' }))
-  await update($, isCompacted, () => false)
+  // A chat that was compacted still owes the agent its digest, under the new id too.
+  await update($, isCompacted, () => isContinued)
   return folder
 }
 
@@ -353,6 +365,8 @@ export const register: Register = (on, options) => {
   })
 
   on('session.end', async ($, e, next) => {
+    // A /clear starts a chat of its own: a compaction before it does not carry over to the new id.
+    if (e.reason === 'clear') await update($, isCompacted, () => false).catch(quiet)
     await flush($, options).catch(quiet)
     return next(e)
   })
