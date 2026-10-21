@@ -26,13 +26,14 @@ const PANE_PROPS = {
 const NOW = Date.UTC(2026, 9, 17, 8, 0, 0)
 
 // An engine whose files live in a map, whose Jev answers `p`, and whose Haiku answers from a script.
-const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = () => '/work/demo') => {
+const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = () => '/work/demo', idOf: () => string = () => ID) => {
   const files = new Map<string, string>()
   // `refuse` names a path that every write fails for; the engine itself refuses any write over 4 MiB.
   const refuse = { path: '' }
   const calls = { jev: 0, haiku: 0, efforts: [] as string[], contexts: [] as (readonly string[] | undefined)[] }
   mock.env(on, { HOME: '/h', OPENROUTER_API_KEY: 'test-key' })
-  on('session.id', () => ({ value: ID }) as never)
+  on('session.id', () => ({ value: idOf() }) as never)
+  on('session.end', () => ({ sessionId: idOf() }) as never)
   on('session.cwd', () => ({ value: cwdOf() }) as never)
   on('command.register', () => ({ value: {} }) as never)
   on('session.start', () => ({ cwd: '/work/demo' }) as never)
@@ -444,4 +445,24 @@ test('a message typed while the previous turn is still being stored is not lost'
   expect((files.get(STEPS) ?? '').split('\n').filter(l => l.startsWith('- t')).length).toBe(2)
   expect(files.get(EVENTS) ?? '').toContain('"user":"second message, sent as the first turn ended"')
   expect((files.get(EVENTS) ?? '').match(/"user":"first message"/g)?.length).toBe(1)
+})
+
+const END = { reason: 'other', sessionId: ID, resume: { id: ID } } as never
+
+test('two drains started at once record each queued turn once', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, calls } = world(on, 0.1, [])
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'first thing', 'Done.', 1)
+  await say($, 'second thing', 'Done.', 2)
+  // The timers have not fired yet; two exits and the timers all find the same queue.
+  const exits = Promise.all([$.session.end(END), $.session.end(END)])
+  // The exit that lost the race waits out its 8 s; the clock is moved past that.
+  for (let i = 0; i < 45; i++) await clock.advance(200)
+  await exits
+
+  expect(calls.haiku).toBe(2)
+  expect((files.get(STEPS) ?? '').split('\n').filter(l => l.startsWith('- t'))).toHaveLength(2)
+  expect((files.get(EVENTS) ?? '').match(/"type":"extract"/g)).toHaveLength(2)
 })

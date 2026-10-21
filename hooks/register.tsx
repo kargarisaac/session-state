@@ -254,8 +254,14 @@ const handle = async ($: EngineInterface, config: Config, turn: PendingTurn): Pr
 
 // Runs outside any hook's budget, one turn at a time, so the next prompt is never held up.
 const drain = async ($: EngineInterface, config: Config): Promise<void> => {
-  if ((await read($, status)).isBusy) return
-  await update($, status, s => ({ ...s, isBusy: true }))
+  // One drain at a time. Claiming is a single update, so two callers that arrive together (a timer, the poller,
+  // the exit) cannot both find it free and record the same turn twice.
+  let isClaimed = false
+  await update($, status, s => {
+    isClaimed = !s.isBusy
+    return isClaimed ? { ...s, isBusy: true } : s
+  })
+  if (!isClaimed) return
   try {
     for (;;) {
       const next = (await read($, queue))[0]
