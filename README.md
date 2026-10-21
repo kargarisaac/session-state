@@ -32,6 +32,8 @@ Work as usual. Then:
 - `/session-state rebuild` moves the chat's ledger files to `before-rebuild/` and reads the whole chat again from Claude Code's transcript. It leaves the files alone when the transcript has no turns to read.
 - Ask the agent "what did I decide about X?" and it reads the ledger.
 
+The panel reads `state.md`, `steps.md` and `history.md` again every few seconds, so a hand edit shows without reopening it. Closing the panel, or asking for a tab, takes the Ledger tab back to `state.md`.
+
 **Steps:** one line per turn, with what the tools did and what the turn added (`+M-002`) or finished (`done M-002`).
 
 ![Steps tab: one line per turn](docs/panel-steps.png)

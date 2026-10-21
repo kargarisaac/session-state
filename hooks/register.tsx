@@ -31,6 +31,7 @@ const dir = atom({ plugin: 'session-state', key: 'dir' } as const, '')
 const origin = atom({ plugin: 'session-state', key: 'origin' } as const, '')
 const md = atom({ plugin: 'session-state', key: 'md' } as const, '')
 const steps = atom({ plugin: 'session-state', key: 'steps' } as const, '')
+const history = atom({ plugin: 'session-state', key: 'history' } as const, '')
 const events = atom({ plugin: 'session-state', key: 'events' } as const, [] as LedgerEvent[])
 const queue = atom({ plugin: 'session-state', key: 'queue' } as const, [] as PendingTurn[])
 const failed = atom({ plugin: 'session-state', key: 'failed' } as const, [] as PendingTurn[])
@@ -205,6 +206,8 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   const archive = archivedTurns(ledger)
   await update($, md, () => text)
   await update($, steps, () => stepsMd)
+  const historyMd = await readText($, historyOf(folder))
+  await update($, history, () => historyMd)
   await update($, events, () => ledger)
   await update($, queue, () => pending)
   // pendingUser and facts are not reset: a turn that is running now ends under this id, and they are its.
@@ -254,8 +257,9 @@ const savePending = async ($: EngineInterface): Promise<void> => {
 }
 
 const saveEvents = async ($: EngineInterface, add: LedgerEvent[]): Promise<LedgerEvent[]> => {
-  const all = [...(await read($, events)), ...add]
-  await update($, events, () => all)
+  // The new events are added to what the atom holds when the write lands: a turn that ends while the last one is
+  // being saved adds its record to the same list.
+  const all = await update($, events, list => [...list, ...add])
   await $.fs.write(eventsOf(await read($, dir)), serializeLedger(all))
   return all
 }
@@ -284,9 +288,11 @@ const handle = async ($: EngineInterface, config: Config, turn: PendingTurn): Pr
   await $.fs.write(stateOf(folder), out)
   await update($, md, () => out)
   if (outcome.moved.length > 0) {
-    const history = await readText($, historyOf(folder))
+    const before = await readText($, historyOf(folder))
     const blocks = outcome.moved.map(historyBlock).join('\n\n')
-    await $.fs.write(historyOf(folder), `${history === '' ? HISTORY_HEAD : history}\n${blocks}\n`)
+    const nextHistory = `${before === '' ? HISTORY_HEAD : before}\n${blocks}\n`
+    await $.fs.write(historyOf(folder), nextHistory)
+    await update($, history, () => nextHistory)
   }
   const nextSteps = appendStep(stepsMd, outcome.step)
   if (nextSteps !== stepsMd) await $.fs.write(stepsOf(folder), nextSteps)
@@ -298,8 +304,13 @@ const handle = async ($: EngineInterface, config: Config, turn: PendingTurn): Pr
 
 // Runs outside any hook's budget, one turn at a time, so the next prompt is never held up.
 const drain = async ($: EngineInterface, config: Config): Promise<void> => {
-  if ((await read($, status)).isBusy) return
-  await update($, status, s => ({ ...s, isBusy: true }))
+  // The loop is claimed in one step on the busy flag itself: of two wake-ups at once, one gets it.
+  let isClaimed = false
+  await update($, status, s => {
+    isClaimed = !s.isBusy
+    return isClaimed ? { ...s, isBusy: true } : s
+  })
+  if (!isClaimed) return
   try {
     for (;;) {
       const next = (await read($, queue))[0]
@@ -338,6 +349,27 @@ const kick = ($: EngineInterface, options: PluginOptions): void =>
     await drain($, await configOf($, options)).catch(quiet)
   })
 
+// The panel follows the files, so a hand edit, a rollback or a rebuild shows within seconds. A read that fails
+// comes back empty: a file the panel holds is let go only after two empty reads in a row.
+const empties = new Map<string, number>()
+
+const hasChanged = (path: string, held: string, text: string): boolean => {
+  const misses = text === '' && held !== '' ? (empties.get(path) ?? 0) + 1 : 0
+  empties.set(path, misses)
+  return misses !== 1 && text !== held
+}
+
+const syncPanel = async ($: EngineInterface): Promise<void> => {
+  // The atoms are read first: a turn that lands while the files are read changes them, and then the turn wins.
+  const held = { md: await read($, md), steps: await read($, steps), history: await read($, history) }
+  const folder = await read($, dir)
+  if (folder === '') return
+  const disk = { md: await readText($, stateOf(folder)), steps: await readText($, stepsOf(folder)), history: await readText($, historyOf(folder)) }
+  if (hasChanged(stateOf(folder), held.md, disk.md)) await update($, md, now => (now === held.md ? disk.md : now))
+  if (hasChanged(stepsOf(folder), held.steps, disk.steps)) await update($, steps, now => (now === held.steps ? disk.steps : now))
+  if (hasChanged(historyOf(folder), held.history, disk.history)) await update($, history, now => (now === held.history ? disk.history : now))
+}
+
 const digestOf = async ($: EngineInterface): Promise<string> => {
   const folder = await ensure($)
   const state = loadState(await read($, md), await frontOf($))
@@ -352,14 +384,13 @@ export const register: Register = (on, options) => {
       description: 'The ledger of this chat: open the panel (steps, ledger, stats), pause, retry, rebuild',
     }).catch(quiet)
     await ensure($).catch(quiet)
+    // The session starts, or the module reloaded: either way no loop of this copy is recording, whatever the
+    // atoms kept from the copy before. Without this a recording that the reload cut short blocks the queue for good.
+    await update($, status, () => ({ isBusy: false, turn: 0, message: '' })).catch(quiet)
     if ((await read($, queue)).length > 0) kick($, options)
     // Picks up the person's hand edits for the panel and wakes a stranded queue.
     $.clock.every(3000, async () => {
-      const folder = await read($, dir)
-      if (folder !== '') {
-        const text = await readText($, stateOf(folder))
-        if (text !== (await read($, md))) await update($, md, () => text)
-      }
+      await syncPanel($).catch(quiet)
       if ((await read($, queue)).length > 0 && !(await read($, status)).isBusy) kick($, options)
     })
     if (options.openPanelOnStart === true) void $.ui.open({ id: PANE, title: TITLE })
@@ -469,6 +500,7 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'session-state' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
     if (arg === 'close') {
+      await update($, isHistoryShown, () => false)
       await $.ui.close({ id: PANE })
       return { text: 'Session ledger panel closed.' }
     }
@@ -508,7 +540,10 @@ export const register: Register = (on, options) => {
     if (arg === 'path') return { text: await ensure($) }
     if (arg === 'digest') return { text: await digestOf($) }
     const chosen = TABS.find(t => t === arg)
-    if (chosen !== undefined) await update($, tab, () => chosen)
+    if (chosen !== undefined) {
+      await update($, tab, () => chosen)
+      await update($, isHistoryShown, () => false)
+    }
     await ensure($).catch(quiet)
     await $.ui.open({ id: PANE, title: TITLE })
     return { text: 'Session ledger panel opened.' }
@@ -546,7 +581,7 @@ export const register: Register = (on, options) => {
     if (shown === 'ledger') {
       const isHistory = await read($, isHistoryShown)
       // The front matter is for tools and the agent; the panel shows the ledger itself.
-      const text = (isHistory ? await readText($, historyOf(folder)) : await read($, md)).replace(/^---\n[\s\S]*?\n---\n?/, '')
+      const text = (isHistory ? await read($, history) : await read($, md)).replace(/^---\n[\s\S]*?\n---\n?/, '')
       return (
         <Box flexDirection="column">
           {tabs}
