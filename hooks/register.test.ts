@@ -1872,3 +1872,26 @@ test('a second rebuild does not overwrite the files the first one set aside', as
   expect(files.get(`${FOLDER}/before-rebuild-2/steps.md`) ?? '').toContain('Chose SQLite.')
   expect(JSON.stringify(second)).toContain('before-rebuild-2/')
 })
+
+test('a boot that failed half way is run again from the start by the next hook, not taken for done', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.95, [SQLITE])
+  files.set(STEPS, '# Steps\n- t1 · ✓ · Asked: Please use SQLite from now on.\n')
+  files.set(EVENTS, `${archived(1, 'Please use SQLite from now on.', 'Done')}\n${extractRun(1, 'haiku: overloaded')}\n`)
+  files.set(`${FOLDER}/pending.json`, JSON.stringify([pendingTurn(1, 'Please use SQLite from now on.', 'Done')]))
+  // The engine refuses the first write of the queue, after the boot has set the folder.
+  let isRefusing = true
+  on('state.set', { plugin: 'session-state', key: 'queue' }, (_$, e, next) => {
+    if (!isRefusing) return next(e)
+    isRefusing = false
+    return { deny: 'state refused' } as never
+  })
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await $.prompt.submit({ text: 'and the linter' } as never)
+  // The queue it loaded is picked up by the next poll.
+  await clock.advance(3000)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('+M-001'))
+
+  expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ · Switched storage to SQLite. · +M-001')
+})

@@ -80,8 +80,9 @@ const findIn = async ($: EngineInterface, root: string, here: string, isMatch: (
 
 const dayOf = async ($: EngineInterface): Promise<string> => new Date(await $.clock.now()).toISOString().slice(0, 10)
 
-const frontOf = async ($: EngineInterface): Promise<Record<string, string>> => {
-  const id = await read($, sessionId)
+// The front matter of this session's files. A boot passes the id it is setting up: the atom holds it only at the end.
+const frontOf = async ($: EngineInterface, settingUp?: string): Promise<Record<string, string>> => {
+  const id = settingUp ?? (await read($, sessionId))
   const cwd = (await read($, origin)) || (await $.session.cwd())
   return newFront({ sessionId: id, project: projectOf(cwd), cwd, started: await dayOf($), transcript: transcriptOf(cwd, id) })
 }
@@ -150,12 +151,12 @@ const parentFolder = async ($: EngineInterface, here: string, folder: string, ho
 
 // A compaction that moved the chat to a new session id keeps its ledger: the old files are copied over, for this
 // session to carry on from. The old folder stays as it was. Says whether there was a parent.
-const inherit = async ($: EngineInterface, here: string, folder: string, home: string, transcript: string, previous: string): Promise<boolean> => {
+const inherit = async ($: EngineInterface, here: string, folder: string, home: string, id: string, transcript: string, previous: string): Promise<boolean> => {
   const uuid = continuesFrom(transcript)
   // A transcript that has messages and no boundary is a chat of its own, not the continuation of the one before it.
   const parent = await parentFolder($, here, folder, home, uuid, transcript === '' || uuid !== undefined ? previous : '')
   if (parent === undefined) return false
-  const front = await frontOf($)
+  const front = await frontOf($, id)
   for (const pathOf of LEDGER_FILES) {
     const text = await readText($, pathOf(parent))
     if (text === '') continue
@@ -189,10 +190,9 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   const found = await findIn($, root, here, (name, kind) => kind === 'dir' && name.endsWith(id8))
   const folder = found ?? `${here}/${folderName(await dayOf($), id)}`
   const transcript = await readText($, transcriptOf(cwd, id).replace(/^~/, home))
-  await update($, sessionId, () => id)
   await update($, dir, () => folder)
   await update($, origin, () => cwd)
-  const isContinued = found === undefined && (await inherit($, here, folder, home, transcript, previous))
+  const isContinued = found === undefined && (await inherit($, here, folder, home, id, transcript, previous))
 
   let ledger = parseLedger(await readText($, eventsOf(folder)))
   let pending = parsePending(await readText($, pendingOf(folder)))
@@ -220,7 +220,7 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
     const old = await findIn($, root, here, (name, kind) => kind === 'file' && name.endsWith(`${id8}.md`))
     if (old !== undefined) {
       const { title, notes } = parseOldNotes(await readText($, old))
-      const front = { ...(await frontOf($)), title }
+      const front = { ...(await frontOf($, id)), title }
       text = renderState(seedState(notes, front), [])
       await $.fs.write(stateOf(folder), text).catch(quiet)
     }
@@ -241,6 +241,8 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   // A chat that was compacted still owes the agent its digest: under the new id, and after a rebuild (which
   // empties the session id, then boots the same chat again).
   await update($, isCompacted, () => isContinued || (before.isCompacted && before.id === ''))
+  // Last, because it says the boot is done: a boot that failed on the way is run again, not taken for finished.
+  await update($, sessionId, () => id)
   return folder
 }
 
