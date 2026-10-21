@@ -305,7 +305,7 @@ const kick = ($: EngineInterface, options: PluginOptions): void =>
 // comes back empty: a file the panel holds is let go only after two empty reads in a row.
 const empties = new Map<string, number>()
 
-const differs = (path: string, held: string, text: string): boolean => {
+const hasChanged = (path: string, held: string, text: string): boolean => {
   const misses = text === '' && held !== '' ? (empties.get(path) ?? 0) + 1 : 0
   empties.set(path, misses)
   return misses !== 1 && text !== held
@@ -317,9 +317,9 @@ const syncPanel = async ($: EngineInterface): Promise<void> => {
   const folder = await read($, dir)
   if (folder === '') return
   const disk = { md: await readText($, stateOf(folder)), steps: await readText($, stepsOf(folder)), history: await readText($, historyOf(folder)) }
-  if (differs(stateOf(folder), held.md, disk.md)) await update($, md, now => (now === held.md ? disk.md : now))
-  if (differs(stepsOf(folder), held.steps, disk.steps)) await update($, steps, now => (now === held.steps ? disk.steps : now))
-  if (differs(historyOf(folder), held.history, disk.history)) await update($, history, now => (now === held.history ? disk.history : now))
+  if (hasChanged(stateOf(folder), held.md, disk.md)) await update($, md, now => (now === held.md ? disk.md : now))
+  if (hasChanged(stepsOf(folder), held.steps, disk.steps)) await update($, steps, now => (now === held.steps ? disk.steps : now))
+  if (hasChanged(historyOf(folder), held.history, disk.history)) await update($, history, now => (now === held.history ? disk.history : now))
 }
 
 const digestOf = async ($: EngineInterface): Promise<string> => {
