@@ -104,6 +104,36 @@ export const parseLedger = (text: string): LedgerEvent[] =>
 
 export const serializeLedger = (events: readonly LedgerEvent[]): string => events.map(e => JSON.stringify(e)).join('\n') + '\n'
 
+// $.fs.write refuses a file over 4 MiB, and a chat that runs for days gets there. The file is kept under this.
+export const LEDGER_MAX = 3_000_000
+// What an old turn keeps of the user's words once the archive is full.
+const OLD_USER = 300
+const OLD_SLACK = 60
+// The newest turns are never shrunk: the later turns read their words back.
+const KEEP_RECENT = 20
+
+const sizeOf = (e: LedgerEvent): number => new TextEncoder().encode(JSON.stringify(e)).length + 1
+
+// Keeps the ledger under `max` bytes: the oldest turns give up their answer and most of their message first (their
+// tool facts stay, so the file index keeps its counts), then the oldest events go. The newest turns are untouched.
+export const fitLedger = (events: readonly LedgerEvent[], max = LEDGER_MAX): LedgerEvent[] => {
+  const kept = [...events]
+  const sizes = kept.map(sizeOf)
+  let total = sizes.reduce((sum, n) => sum + n, 0)
+  const recent = new Set(kept.flatMap((e, i) => (e.type === 'turn' ? [i] : [])).slice(-KEEP_RECENT))
+  for (let i = 0; i < kept.length && total > max; i++) {
+    const e = kept[i]!
+    if (e.type !== 'turn' || recent.has(i) || (e.answer === '' && e.user.length <= OLD_USER + OLD_SLACK)) continue
+    kept[i] = { ...e, user: clip(e.user, OLD_USER), answer: '' }
+    const size = sizeOf(kept[i]!)
+    total += size - sizes[i]!
+    sizes[i] = size
+  }
+  let dropped = 0
+  while (total > max && dropped < kept.length) total -= sizes[dropped++]!
+  return kept.slice(dropped)
+}
+
 // The archive keeps each turn so later turns can still read it after Claude Code compacts the chat.
 const ARCHIVE_USER = 8000
 const ARCHIVE_ANSWER = 4000

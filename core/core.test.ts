@@ -6,7 +6,7 @@ import { checkFileRoles, checkLearnings, checkMemories, isQuoteOf, parseExtracti
 import { addToolCall, emptyFacts, factsText } from './facts'
 import { fileIndex, rankFiles } from './files'
 import { gateState, parseGate } from './gate'
-import { archivedTurns, haikuCost, parseLedger, parsePending, serializeLedger, serializePending, summarize, turnRecord } from './ledger'
+import { archivedTurns, fitLedger, haikuCost, parseLedger, parsePending, serializeLedger, serializePending, summarize, turnRecord } from './ledger'
 import { activeNotes, applyMemories, newFront, openAsks, parseOldNotes, rulesText, upsertIndex } from './notes'
 import { processTurn } from './pipeline'
 import type { Ledger } from './pipeline'
@@ -95,6 +95,40 @@ test('redact hides keys and secret-looking assignments but not prose', async () 
   expect(out.includes('abcdefghijklmnop')).toBe(false)
 })
 
+test('redact also hides passwords in URLs, Basic auth, AWS and API secrets in settings, more token kinds and a cut-off private key', async () => {
+  const secrets: [string, string][] = [
+    ['postgres://admin:s3cretpw@db.example.com:5432/app', 's3cretpw'],
+    ['git clone https://x-access-token:abc123def@github.com/org/repo.git', 'abc123def'],
+    ['DATABASE_URL=postgres://admin:s3cretpw@db.example.com/app', 's3cretpw'],
+    ['Authorization: Basic dXNlcjpwYXNzd29yZA==', 'dXNlcjpwYXNzd29yZA'],
+    ['ASIAIOSFODNN7EXAMPLE', 'ASIAIOSFODNN7EXAMPLE'],
+    ['aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', 'wJalrXUtnFEMI'],
+    ['{"api_key": "abcdef1234567890xyz", "password": "hunter2hunter2"}', 'abcdef1234567890xyz'],
+    ['cd app && FOO_TOKEN=abc123 python run.py', 'abc123'],
+    ['hf_abcdefghijklmnopqrstuvwxyz0123456789', 'abcdefghijklmnopqrstuvwxyz'],
+    ['npm_abcdefghijklmnopqrstuvwxyz0123456789', 'abcdefghijklmnopqrstuvwxyz'],
+    ['sk_live_' + 'abcdefghijklmnopqrstuvwx', 'abcdefghijklmnopqrstuvwx'],
+    ['glpat-abcdefghijklmnopqrst', 'abcdefghijklmnopqrst'],
+    ['eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c', 'eyJzdWIiOiIx'],
+    ['-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\nabc', 'b3BlbnNzaC1rZXktdjEAAAAA'],
+  ]
+  for (const [text, secret] of secrets) expect([text, redact(text).includes(secret)]).toEqual([text, false])
+  const prose = [
+    'Key points: always use SQLite; token: string; the password field is hidden',
+    'see https://example.com/docs:443/x and ssh://git@github.com/org/repo, or git@github.com:org/repo.git',
+    'const apiKey = process.env.API_KEY',
+  ]
+  for (const text of prose) expect(redact(text)).toBe(text)
+})
+
+test('redact stays fast on a huge paste of blank lines or dotted words', async () => {
+  const start = Date.now()
+  redact(' \n'.repeat(40000))
+  redact('a.'.repeat(300000))
+  redact('A-'.repeat(300000))
+  expect(Date.now() - start).toBeLessThan(1000)
+})
+
 test('clip keeps the start and the end of a long text', async () => {
   const out = clip('A'.repeat(500) + 'B'.repeat(500), 100)
   expect(out.startsWith('AAAA')).toBe(true)
@@ -126,6 +160,12 @@ test('tool calls become the turn facts: reads, edits, failed commands and commit
   expect(f.failures[0]!.error.includes('abcdef1234567890')).toBe(false)
   expect(f.commits).toEqual(['3fa2c1b Fix parser'])
   expect(factsText(f, CWD)).toBe('edited b.ts · read 1 file · 2 commands, 1 failed · commit 3fa2c1b Fix parser')
+})
+
+test('a read that failed is not a file the chat touched', async () => {
+  const f = addToolCall(emptyFacts(), { tool: 'Read', input: { file_path: `${CWD}/missing.ts` }, isError: true, text: 'File does not exist.' })
+  expect(f.read).toEqual([])
+  expect(factsText(f, CWD)).toBe('')
 })
 
 // ---- parsing and checking Haiku's reply
@@ -185,6 +225,15 @@ test('memory checks drop invented quotes, over-long notes and duplicates, and ti
   expect(checked.dropped.length).toBe(2)
 })
 
+test('a quote or evidence copied from the redacted text Haiku was shown still matches, and no secret is stored', async () => {
+  const user = 'use this key sk-or-v1-abcdef1234567890abcdef for prod and always use SQLite'
+  const checked = checkMemories([memory('Use the given key in prod.', 'use this key [redacted key] for prod')], user, [], 15, 5)
+  expect(checked.kept.map(m => m.quote)).toEqual(['use this key [redacted key] for prod'])
+  const answer = 'The call failed: key sk-or-v1-abcdef1234567890abcdef rejected by the server.'
+  const learned = checkLearnings([{ kind: 'failed', text: 'The key was rejected.', why: '', evidence: 'key [redacted key] rejected by the server', replaces: [] }], answer, withFacts({}), [])
+  expect(learned.kept.length).toBe(1)
+})
+
 test('a learning must cite the reply or a failed command; a role only fits a file edited this turn', async () => {
   const facts = withFacts({ edited: [`${CWD}/core/a.ts`], failures: [{ command: 'bun x', error: 'ENOENT: no such file' }] })
   const learned = checkLearnings(
@@ -242,6 +291,47 @@ test('state.md round-trips rich notes, learnings, roles and the person\'s own li
   expect(next.state.notes.map(n => n.id)).toEqual([1, 3])
 })
 
+// A state.md with two notes, a learning, a role and a line of the person's own.
+const richMd = (): string => {
+  let { state } = applyMemories(
+    fresh(),
+    [memory('Use SQLite for storage.', 'use SQLite', { why: 'One file.', context: 'Choosing the store.' }), memory('Rename the video.', 'rename it', { kind: 'ask' })],
+    3,
+    'turn-uuid-123456',
+    'Storage choice',
+  )
+  state = applyLearnings(state, [{ kind: 'failed', text: 'Bun test needs the runner.', why: 'imports', evidence: 'Cannot find module', replaces: [] }], 3).state
+  state = applyFileRoles(state, [{ path: `${CWD}/core/state.ts`, role: 'Reads and writes state.md' }])
+  return renderState({ ...state, own: ['- ship on friday'] }, richFiles)
+}
+const richFiles = fileIndex([turnRecord(turn('x', 3, { facts: withFacts({ edited: [`${CWD}/core/state.ts`] }) }), 0)])
+
+test('a state.md saved with Windows line endings reads the same as one with Unix endings', async () => {
+  const md = richMd()
+  const crlf = parseState(md.replace(/\n/g, '\r\n'))
+  expect(crlf).toEqual(parseState(md))
+  expect(renderState(crlf, richFiles)).toBe(md)
+  expect(crlf.notes.map(n => n.why)).toEqual(['One file.', ''])
+  expect(crlf.front.title).toBe('Storage choice')
+  expect(Object.keys(crlf.roles)).toEqual(['core/state.ts'])
+})
+
+test('everything the person writes under "Your notes" is kept: blank lines, sub-headings and what follows them', async () => {
+  const hand = `${richMd()}\n- second para\n\n## Todo\n- item under a heading\n`
+  const state = parseState(hand)
+  expect(state.own).toEqual(['- ship on friday', '', '- second para', '', '## Todo', '- item under a heading'])
+  const again = renderState(state, [])
+  expect(again).toContain('## Your notes\n- ship on friday\n\n- second para\n\n## Todo\n- item under a heading\n')
+  expect(renderState(parseState(again), [])).toBe(again)
+})
+
+test('a note heading the person broke does not take over the note above it', async () => {
+  const two = applyMemories(fresh(), [memory('Use SQLite.', 'use SQLite', { why: 'One file.' }), memory('Keep answers short.', 'short', { why: 'Less to read.' })], 3, '', '').state
+  const md = renderState(two, []).replace('### M-002 · decision · t3', '### M-002 · decision')
+  const state = parseState(md)
+  expect(state.notes.map(n => [n.id, n.text, n.why])).toEqual([[1, 'Use SQLite.', 'One file.']])
+})
+
 test('replaced and finished items move to history with what replaced them; only asks can finish', async () => {
   let { state } = applyMemories(fresh(), [memory('Use Postgres.', 'q'), memory('Rename the video.', 'q', { kind: 'ask' })], 1, '', '')
   expect(openAsks(state).map(n => n.id)).toEqual([2])
@@ -260,6 +350,16 @@ test('steps.md is append-only, one line per turn', async () => {
   expect(appendStep(md, step)).toBe(md)
   const two = appendStep(md, { ...step, turn: 5, outcome: 'aborted', facts: '', added: [], done: [] })
   expect(stepLines(two)).toEqual(['- t4 · ✓ · Moved the parser. · edited a.ts · +M-003 · done M-001', '- t5 · ◌ · Moved the parser.'])
+})
+
+test('a turn run again after Haiku failed replaces its own step line, in place', async () => {
+  const at = (turn: number, text: string, added: string[] = []) => ({ turn, outcome: 'ok' as const, text, facts: '', added, done: [] })
+  let md = ''
+  for (const step of [at(3, 'Ran the tests.'), at(4, 'Asked: use SQLite'), at(5, 'Wrote the docs.')]) md = appendStep(md, step)
+  const better = at(4, 'Switched storage to SQLite.', ['M-007'])
+  const again = appendStep(md, better)
+  expect(stepLines(again)).toEqual(['- t3 · ✓ · Ran the tests.', '- t4 · ✓ · Switched storage to SQLite. · +M-007', '- t5 · ✓ · Wrote the docs.'])
+  expect(appendStep(again, better)).toBe(again)
 })
 
 test('an old single-file notes file seeds the ledger with its active notes only', async () => {
@@ -417,6 +517,18 @@ test('Haiku failing twice keeps the state, records the error, and the step falls
   expect(out.events[1]).toMatchObject({ type: 'extract', kept: 0, error: 'haiku: no scripted reply' })
 })
 
+test('a Haiku call that throws counts as a failed attempt: the turn still gets its step line and an error event', async () => {
+  const { host, calls } = fakeHost(0.95, [])
+  host.complete = async () => {
+    calls.complete += 1
+    throw new Error('model is blocked')
+  }
+  const out = await processTurn(host, config(), ledgerOf(fresh()), turn('use SQLite'))
+  expect(calls.complete).toBe(2)
+  expect(out.step.text).toBe('Asked: use SQLite')
+  expect(out.events[1]).toMatchObject({ type: 'extract', kept: 0, error: 'haiku: threw Error: model is blocked' })
+})
+
 test('one turn can finish an ask, record a learning, name a file and replace a decision', async () => {
   const seed = applyMemories(fresh(), [memory('Rename the video.', 'q', { kind: 'ask' }), memory('Use Postgres.', 'q')], 1, '', '').state
   const facts = withFacts({ edited: [`${CWD}/video.ts`], commands: 1, failures: [{ command: 'ffmpeg -i a', error: 'codec not found' }] })
@@ -452,6 +564,29 @@ test('the ledger round-trips, keeps the turn archive, and its totals match the e
   expect(stats.haikuCost).toBe(haikuCost(USAGE))
   expect(parsePending(serializePending([t]))).toEqual([t])
   expect(parsePending('[{"turn":1,"turnId":"x","user":"u","answer":"a"}]')[0]!.facts).toEqual(emptyFacts())
+})
+
+test('a full ledger gives up the words of its oldest turns first, then its oldest events, and nothing recent', async () => {
+  const facts = (n: number) => withFacts({ read: [`/work/demo/f${n}.ts`] })
+  const events = Array.from({ length: 40 }, (_, i) => turnRecord(turn(`message ${i + 1} ${'u'.repeat(1000)}`, i + 1, { answer: 'a'.repeat(1000), facts: facts(i + 1) }), i))
+  const size = (list: readonly (typeof events)[number][]) => serializeLedger(list).length
+
+  expect(fitLedger(events, 1e9)).toEqual(events)
+
+  const squeezed = fitLedger(events, 70_000)
+  expect(size(squeezed)).toBeLessThanOrEqual(70_000)
+  expect(squeezed.length).toBe(40)
+  const [oldest, newest] = [squeezed[0]!, squeezed[39]!]
+  expect(oldest).toMatchObject({ type: 'turn', answer: '' })
+  expect(oldest.type === 'turn' && oldest.facts.read).toEqual(['/work/demo/f1.ts'])
+  expect(newest).toEqual(events[39])
+  expect(fitLedger(squeezed, 70_000)).toEqual(squeezed)
+
+  const tiny = fitLedger(events, 45_000)
+  expect(size(tiny)).toBeLessThanOrEqual(45_000)
+  expect(tiny.length).toBeLessThan(40)
+  expect(tiny.at(-1)).toEqual(events[39])
+  expect(tiny[0]).toMatchObject({ type: 'turn', turn: 40 - tiny.length + 1 })
 })
 
 test('the rules for the system prompt are only requirements and preferences, newest eight', async () => {

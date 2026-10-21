@@ -40,6 +40,12 @@ const world = (
   hold: () => Promise<void> = async () => {},
 ) => {
   const files = new Map<string, string>()
+  // `refuse` names a path that every write fails for; the engine itself refuses any write over 4 MiB.
+  const refuse = { path: '' }
+  // `stall.until` makes the next Haiku call wait for it, as a slow answer would.
+  const stall = { until: undefined as Promise<void> | undefined }
+  // `hang.jev` makes OpenRouter take the request and never answer it.
+  const hang = { jev: false }
   const calls = { jev: 0, haiku: 0, efforts: [] as string[], contexts: [] as (readonly string[] | undefined)[], isDropping: false }
   // A read of a path waits for its hold and then answers what the file held when it was asked; Haiku waits for its
   // hold, and fails its next `fails` calls.
@@ -78,6 +84,7 @@ const world = (
   const written = new Map<string, number>()
   let tick = 0
   on('fs.write', (_$, e) => {
+    if (e.text.length > 4 * 1024 * 1024 || e.path === refuse.path) throw new Error('write refused')
     files.set(e.path, e.text)
     written.set(e.path, ++tick)
     return { value: undefined } as never
@@ -97,6 +104,7 @@ const world = (
   })
   on('http.fetch', () => {
     calls.jev += 1
+    if (hang.jev) return new Promise(() => {}) as never
     const body = { model: 'typesafe/jev-1.14-x', answers: { important: { type: 'noul', noul: p } }, usage: { input_tokens: 356, output_tokens: 20, cost: 0.000015 } }
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } } as never
   })
@@ -109,9 +117,14 @@ const world = (
       return { value: { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: USAGE } } as never
     }
     const next = replies[calls.haiku++] ?? { step: { text: 'Answered.', outcome: 'ok' }, memories: [] }
+    const wait = stall.until
+    stall.until = undefined
+    if (wait !== undefined) await wait
+    // A reply of { fail: true } is Haiku being overloaded.
+    if ('fail' in next) return { value: { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: USAGE } } as never
     return { value: { isAnswered: true, text: JSON.stringify(next), usage: USAGE } } as never
   })
-  return { files, calls, written, holds }
+  return { files, calls, written, holds, refuse, stall, hang }
 }
 
 const say = async ($: TestDollar, text: string, answer: string, n: number) => {
@@ -1496,4 +1509,203 @@ test('compactions that move the chat to a new id twice in a row, composing a req
   await $.prompt.submit({ text: 'what next?' } as never)
 
   expect(digestOn(calls.contexts)).toContain('M-001 (t1) Use SQLite for storage.')
+})
+
+
+test('retry runs a failed turn again and rewrites its step line with what it found', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, calls } = world(on, 0.95, [{ fail: true }, { fail: true }, SQLITE])
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ · Asked: Please use SQLite from now on.')
+  const out = await $.command.run({ command: 'session-state', args: 'retry' } as never)
+  expect(JSON.stringify(out)).toContain('Retrying 1 turn.')
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('+M-001'))
+
+  const lines = (files.get(STEPS) ?? '').split('\n').filter(l => l.startsWith('- t'))
+  expect(lines).toEqual(['- t1 · ✓ · Switched storage to SQLite. · +M-001'])
+  expect(files.get(STATE) ?? '').toContain('### M-001 · decision · t1')
+  expect(calls.haiku).toBe(3)
+})
+
+const archived = (turn: number, user: string, answer: string) =>
+  JSON.stringify({ type: 'turn', at: 1, turn, turnId: `old${turn}`, user, answer, facts: { read: [`/work/demo/f${turn}.ts`], edited: [], commands: 0, failures: [], commits: [] } })
+
+test('a long chat whose archive reaches 4 MiB still gets its state and steps written', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.1, [])
+  // An events.jsonl of about 1000 archived turns, a hair under the 4 MiB the engine lets a file or a state value hold.
+  const rows: string[] = []
+  let size = 0
+  while (size + archived(1, 'u'.repeat(1500), 'a'.repeat(2500)).length < 4_190_000) {
+    rows.push(archived(rows.length + 1, 'u'.repeat(1500), 'a'.repeat(2500)))
+    size += rows.at(-1)!.length + 1
+  }
+  rows.push(archived(rows.length + 1, 'u'.repeat(4_193_000 - size - archived(1, '', '').length - 1), ''))
+  files.set(EVENTS, `${rows.join('\n')}\n`)
+  expect((files.get(EVENTS) ?? '').length).toBeLessThan(4 * 1024 * 1024)
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'run the tests', 'All pass.', rows.length + 1)
+  await settle(clock, files, f => f.has(STEPS))
+
+  expect(files.get(STEPS) ?? '').toContain(`- t${rows.length + 1} · ✓ · Answered.`)
+  const events = files.get(EVENTS) ?? ''
+  expect(events.length).toBeLessThan(3_100_000)
+  expect(events).toContain('"user":"run the tests"')
+  // The oldest turn keeps its tool facts but not its words.
+  const first = events.split('\n').find(line => line.includes('"turn":1,')) ?? ''
+  expect(first).toContain('/work/demo/f1.ts')
+  expect(first.length).toBeLessThan(900)
+})
+
+test('a failing write of events.jsonl does not stop the state and the step line', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, refuse } = world(on, 0.95, [SQLITE])
+  refuse.path = EVENTS
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+
+  expect(files.get(STATE) ?? '').toContain('### M-001 · decision · t1')
+  expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ · Switched storage to SQLite. · +M-001')
+})
+
+test('a message typed while the previous turn is still being stored is not lost', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.1, [])
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await $.prompt.submit({ text: 'first message' } as never)
+  await $.turn.start({ text: 'first message', turnId: 't1' } as never)
+  await Promise.all([
+    $.turn.complete({ turnId: 't1', answer: 'Done.', durationMs: 10, isAborted: false } as never),
+    $.prompt.submit({ text: 'second message, sent as the first turn ended' } as never),
+  ])
+  await $.turn.start({ text: 'second message, sent as the first turn ended', turnId: 't2' } as never)
+  await $.turn.complete({ turnId: 't2', answer: 'Done again.', durationMs: 10, isAborted: false } as never)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t2'))
+
+  expect((files.get(STEPS) ?? '').split('\n').filter(l => l.startsWith('- t')).length).toBe(2)
+  expect(files.get(EVENTS) ?? '').toContain('"user":"second message, sent as the first turn ended"')
+  expect((files.get(EVENTS) ?? '').match(/"user":"first message"/g)?.length).toBe(1)
+})
+
+const END = { reason: 'other', sessionId: ID, resume: { id: ID } } as never
+
+test('two drains started at once record each queued turn once', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, calls } = world(on, 0.1, [])
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'first thing', 'Done.', 1)
+  await say($, 'second thing', 'Done.', 2)
+  // The timers have not fired yet; two exits and the timers all find the same queue.
+  const exits = Promise.all([$.session.end(END), $.session.end(END)])
+  // The exit that lost the race waits out its 8 s; the clock is moved past that.
+  for (let i = 0; i < 45; i++) await clock.advance(200)
+  await exits
+
+  expect(calls.haiku).toBe(2)
+  expect((files.get(STEPS) ?? '').split('\n').filter(l => l.startsWith('- t'))).toHaveLength(2)
+  expect((files.get(EVENTS) ?? '').match(/"type":"extract"/g)).toHaveLength(2)
+})
+
+const pendingTurn = (n: number, user: string, answer: string) => ({ turn: n, turnId: `t${n}`, user, answer, previousAnswer: '', isAborted: false, facts: { read: [], edited: [], commands: 0, failures: [], commits: [] } })
+const extractRun = (turn: number, error?: string) =>
+  JSON.stringify({ type: 'extract', at: 1, turn, turnId: `t${turn}`, model: 'm', mode: 'extract', ms: 1, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, kept: 1, learned: 0, closed: 0, roles: 0, dropped: [], ...(error === undefined ? {} : { error }) })
+const RECORDED_STATE =
+  '---\nsession_id: abc12345-0000-0000-0000-000000000000\nproject: demo\ncwd: /work/demo\nstarted: 2026-10-17\ntitle: Storage choice\nnext_id: 2\nnext_learning: 1\n---\n# Storage choice\n\n## Decisions and rules\n### M-001 · decision · t1\nUse SQLite for storage.\nWhy: No server to run.\nQuote: "use SQLite"\nSource: t1 · turn t1\n'
+
+test('a queued turn that was fully recorded before the process stopped is not recorded again', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const again = { ...SQLITE, memories: [{ ...SQLITE.memories[0]!, text: 'Storage is SQLite.' }] }
+  const { files, calls } = world(on, 0.95, [again])
+  // The last run wrote everything for turn 1 but died before it emptied pending.json.
+  files.set(STATE, RECORDED_STATE)
+  files.set(STEPS, '# Steps\n- t1 · ✓ · Switched storage to SQLite. · +M-001\n')
+  files.set(EVENTS, `${archived(1, 'Please use SQLite from now on.', 'Done')}\n${extractRun(1)}\n`)
+  files.set(`${FOLDER}/pending.json`, JSON.stringify([pendingTurn(1, 'Please use SQLite from now on.', 'Done')]))
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await settle(clock, files, f => f.get(`${FOLDER}/pending.json`) === '[]')
+
+  expect(calls.haiku).toBe(0)
+  expect(files.get(STATE)).toBe(RECORDED_STATE)
+  expect(files.get(`${FOLDER}/pending.json`)).toBe('[]')
+})
+
+test('a queued turn whose last run failed is recorded when it is picked up again', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, calls } = world(on, 0.95, [SQLITE])
+  files.set(STEPS, '# Steps\n- t1 · ✓ · Asked: Please use SQLite from now on.\n')
+  files.set(EVENTS, `${archived(1, 'Please use SQLite from now on.', 'Done')}\n${extractRun(1, 'haiku: overloaded')}\n`)
+  files.set(`${FOLDER}/pending.json`, JSON.stringify([pendingTurn(1, 'Please use SQLite from now on.', 'Done')]))
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('+M-001'))
+
+  expect(calls.haiku).toBe(1)
+  expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ · Switched storage to SQLite. · +M-001')
+})
+
+test('a /clear while Haiku is still working does not put the old turn into the new chat', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const NEW_ID = 'bbbb2222-0000-0000-0000-000000000000'
+  const NEW_FOLDER = `${ROOT}/demo/2026-10-17_bbbb2222`
+  let id = ID
+  const { files, stall } = world(on, 0.95, [SQLITE], () => '/work/demo', () => id)
+  let release = () => {}
+  stall.until = new Promise<void>(resolve => {
+    release = resolve
+  })
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await clock.advance(1)
+  // /clear: the exit gives up waiting, and the process goes on under a new session id.
+  const exit = $.session.end({ reason: 'clear', sessionId: ID, resume: { id: ID } } as never)
+  for (let i = 0; i < 45; i++) await clock.advance(200)
+  await exit
+  id = NEW_ID
+  await say($, 'run the tests', 'All pass.', 1)
+  await settle(clock, files, f => f.has(`${NEW_FOLDER}/steps.md`))
+  release()
+  for (let i = 0; i < 10; i++) await clock.advance(10)
+
+  const steps = files.get(`${NEW_FOLDER}/steps.md`) ?? ''
+  expect(steps.split('\n').filter(l => l.startsWith('- t'))).toEqual(['- t1 · ✓ · Answered.'])
+  const events = files.get(`${NEW_FOLDER}/events.jsonl`) ?? ''
+  expect(events.includes('Please use SQLite')).toBe(false)
+  expect((events.match(/"type":"extract"/g) ?? []).length).toBe(1)
+  expect(files.get(`${NEW_FOLDER}/state.md`) ?? '').not.toContain('SQLite')
+  // The old chat did not lose its turn: it is still queued in its own folder for when that chat is opened again.
+  expect(JSON.parse(files.get(`${FOLDER}/pending.json`) ?? '[]').map((t: { turn: number }) => t.turn)).toEqual([1])
+  const ui = await mountPane($)
+  expect(await textOf(ui)).toContain('t1 · ✓ · Answered.')
+  expect((await textOf(ui)).includes('Switched storage')).toBe(false)
+})
+
+test('a Jev request that never answers does not stall the queue: the gate fails and the turn is still recorded', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, calls, hang } = world(on, 0.95, [SQLITE, { step: { text: 'Ran the tests.', outcome: 'ok' }, memories: [] }])
+  hang.jev = true
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await say($, 'run the tests', 'All pass.', 2)
+  for (let i = 0; i < 300 && !(files.get(STEPS) ?? '').includes('- t2'); i++) await clock.advance(200)
+
+  const steps = files.get(STEPS) ?? ''
+  expect(steps).toContain('- t1 · ✓ · Switched storage to SQLite. · +M-001')
+  expect(steps).toContain('- t2 · ✓ · Ran the tests.')
+  const events = files.get(EVENTS) ?? ''
+  expect(events).toContain('"action":"error"')
+  expect(events).toContain('jev did not answer')
+  // A turn the gate could not judge goes to extraction, as with any other gate error.
+  expect(events).toContain('"mode":"extract"')
+  expect(calls.haiku).toBe(2)
 })

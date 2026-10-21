@@ -4,14 +4,14 @@ import type { EngineInterface, PluginOptions, Register } from 'claude-code'
 import { digestText } from '../core/digest'
 import { addToolCall, emptyFacts } from '../core/facts'
 import { fileIndex, rankFiles } from '../core/files'
-import { archivedTurns, parseLedger, parsePending, serializeLedger, serializePending, summarize, turnRecord } from '../core/ledger'
+import { archivedTurns, fitLedger, parseLedger, parsePending, serializeLedger, serializePending, summarize, turnRecord } from '../core/ledger'
 import { activeNotes, newFront, parseOldNotes, pointerText, rulesText, upsertIndex } from '../core/notes'
 import { processTurn } from '../core/pipeline'
 import { emptyState, HISTORY_HEAD, historyBlock, parseState, renderState, seedState } from '../core/state'
 import { appendStep, hasStep, lastStep, stepLines } from '../core/steps'
 import { answersOf, continuesFrom, hasMessage, parseTranscript, withAnswers } from '../core/transcript'
 import type { Config, State, Turn } from '../core/types'
-import type { LedgerEvent, PendingTurn, Status, Tab } from '../types'
+import type { ExtractEvent, LedgerEvent, PendingTurn, Status, Tab } from '../types'
 import { gateLines, rows } from './format'
 import { configOf, hostOf } from './host'
 import { baseOf, dirOf, eventsOf, folderName, historyOf, pendingOf, projectOf, stateOf, stepsOf, transcriptOf } from './paths'
@@ -259,22 +259,34 @@ const savePending = async ($: EngineInterface): Promise<void> => {
 
 const saveEvents = async ($: EngineInterface, add: LedgerEvent[]): Promise<LedgerEvent[]> => {
   // The new events are added to what the atom holds when the write lands: a turn that ends while the last one is
-  // being saved adds its record to the same list.
-  const all = await update($, events, list => [...list, ...add])
+  // being saved adds its record to the same list. The archive is kept inside the engine's file size limit.
+  const all = await update($, events, list => fitLedger([...list, ...add]))
   await $.fs.write(eventsOf(await read($, dir)), serializeLedger(all))
   return all
 }
 
 const isFailure = (e: LedgerEvent): boolean => e.type === 'extract' && e.error !== undefined
 
+// A turn whose step line is written and whose last run did not fail was recorded before the process stopped (it died
+// between the step line and emptying pending.json). Running it again would add its notes a second time.
+const isRecorded = (stepsMd: string, all: readonly LedgerEvent[], turn: PendingTurn): boolean => {
+  const runs = all.filter((e): e is ExtractEvent => e.type === 'extract' && e.turn === turn.turn && e.turnId === turn.turnId)
+  return runs.length > 0 && runs[runs.length - 1]!.error === undefined && hasStep(stepsMd, turn.turn)
+}
+
+// A /clear, a resume or a compaction moves the process to another chat while a turn is still being recorded.
+const isHere = async ($: EngineInterface, folder: string): Promise<boolean> => (await read($, dir)) === folder
+
 // Says whether the turn is done. It is not when the chat moved to a new session id while Haiku was writing it up:
-// the turn is then handled again, in the folder of the session that has it queued.
-const handle = async ($: EngineInterface, config: Config, turn: PendingTurn): Promise<boolean> => {
-  const folder = await read($, dir)
+// nothing is written then, and the turn stays queued in the folder that has it (a compaction's new session has
+// inherited that queue, so it is handled again there).
+const handle = async ($: EngineInterface, config: Config, turn: PendingTurn, folder: string): Promise<boolean> => {
   const state = loadState(await readText($, stateOf(folder)), await frontOf($))
   const stepsMd = await readText($, stepsOf(folder))
+  const all = await read($, events)
+  if (isRecorded(stepsMd, all, turn)) return true
   // A turn read back from the transcript sees only the turns before it, as it would have live.
-  const ledger = (await read($, events)).filter(e => e.type !== 'turn' || e.turn <= turn.turn)
+  const ledger = all.filter(e => e.type !== 'turn' || e.turn <= turn.turn)
 
   const outcome = await processTurn(
     hostOf($, config),
@@ -282,9 +294,10 @@ const handle = async ($: EngineInterface, config: Config, turn: PendingTurn): Pr
     { state, steps: stepLines(stepsMd), archive: archivedTurns(ledger), files: ranked(state, ledger, turn.turn) },
     turn,
   )
-  if ((await read($, dir)) !== folder) return false
+  if (!(await isHere($, folder))) return false
 
-  await saveEvents($, outcome.events)
+  // The state and the step line matter more than the archive: a failed write of it must not stop them.
+  await saveEvents($, outcome.events).catch(quiet)
   const out = renderState(outcome.state, ranked(outcome.state, ledger, turn.turn))
   await $.fs.write(stateOf(folder), out)
   await update($, md, () => out)
@@ -305,7 +318,8 @@ const handle = async ($: EngineInterface, config: Config, turn: PendingTurn): Pr
 
 // Runs outside any hook's budget, one turn at a time, so the next prompt is never held up.
 const drain = async ($: EngineInterface, config: Config): Promise<void> => {
-  // The loop is claimed in one step on the busy flag itself: of two wake-ups at once, one gets it.
+  // The loop is claimed in one step on the busy flag itself: of two wake-ups at once, one gets it, so a turn is
+  // never recorded twice.
   let isClaimed = false
   await update($, status, s => {
     isClaimed = !s.isBusy
@@ -314,14 +328,17 @@ const drain = async ($: EngineInterface, config: Config): Promise<void> => {
   if (!isClaimed) return
   try {
     for (;;) {
+      // The queue in the atoms is the loaded chat's, and so is the folder: both are read again for each turn.
+      const folder = await read($, dir)
       const next = (await read($, queue))[0]
       if (next === undefined) break
       await update($, status, s => ({ ...s, turn: next.turn }))
       let isDone = true
       try {
-        isDone = await handle($, config, next)
+        isDone = await handle($, config, next, folder)
         await update($, status, s => ({ ...s, message: '' }))
       } catch (err) {
+        if (!(await isHere($, folder))) continue
         await update($, status, s => ({ ...s, message: `error: ${String(err).slice(0, 140)}` }))
         await update($, failed, list => [...list, next].slice(-MAX_FAILED))
       }
@@ -465,7 +482,18 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
       try {
-        const user = await read($, pendingUser)
+        // Taken and cleared in one step each, before anything else is awaited: a message or a tool call that lands
+        // while this turn is being stored belongs to the next turn and must not be cleared with it.
+        let user = ''
+        let toolFacts = emptyFacts()
+        await update($, pendingUser, p => {
+          user = p
+          return ''
+        })
+        await update($, facts, f => {
+          toolFacts = f
+          return emptyFacts()
+        })
         if (user.trim() !== '' && !(await read($, isPaused))) {
           await ensure($)
           const n = (await read($, turns)) + 1
@@ -476,7 +504,7 @@ export const register: Register = (on, options) => {
             answer: e.answer,
             previousAnswer: await read($, previousAnswer),
             isAborted: e.isAborted,
-            facts: await read($, facts),
+            facts: toolFacts,
           }
           await update($, turns, () => n)
           await saveEvents($, [turnRecord(turn, await $.clock.now())]).catch(quiet)
@@ -485,8 +513,6 @@ export const register: Register = (on, options) => {
           kick($, options)
         }
         if (e.answer !== '') await update($, previousAnswer, () => e.answer)
-        await update($, pendingUser, () => '')
-        await update($, facts, () => emptyFacts())
       } catch {
         // never fail the turn's end
       }

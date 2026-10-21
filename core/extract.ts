@@ -1,4 +1,5 @@
 import { shortPath } from './facts'
+import { redact } from './redact'
 import { KINDS, LEARN_KINDS } from './types'
 import type { Kind, LearnKind, Learning, LearningDraft, Memory, Note, Step, TurnFacts } from './types'
 
@@ -131,6 +132,8 @@ export type Checked = { kept: Memory[]; overLong: Memory[]; dropped: string[] }
 
 // Code, not the model, decides what is saved: the quote must be the user's own words.
 export const checkMemories = (memories: Memory[], user: string, active: Note[], maxWords: number, turn: number): Checked => {
+  // Haiku read the redacted message, so a quote may carry a "[redacted ...]" mark where a secret was.
+  const words = [user, redact(user)]
   const activeIds = new Set(active.map(n => n.id))
   const seen = new Set(active.map(n => squash(n.text).toLowerCase()))
   const kept: Memory[] = []
@@ -138,7 +141,7 @@ export const checkMemories = (memories: Memory[], user: string, active: Note[], 
   const dropped: string[] = []
   for (const m of memories) {
     if (m.text === '') dropped.push('empty text')
-    else if (!isQuoteOf(m.quote, user)) dropped.push(`quote not in the user message: ${m.text.slice(0, 40)}`)
+    else if (!words.some(w => isQuoteOf(m.quote, w))) dropped.push(`quote not in the user message: ${m.text.slice(0, 40)}`)
     else if (wordCount(m.text) > maxWords) overLong.push(m)
     else if (seen.has(squash(m.text).toLowerCase())) dropped.push(`duplicate: ${m.text.slice(0, 40)}`)
     else {
@@ -158,13 +161,14 @@ export const checkMemories = (memories: Memory[], user: string, active: Note[], 
 // A learning must cite the agent's reply or a failed command word for word.
 export const checkLearnings = (drafts: LearningDraft[], answer: string, facts: TurnFacts, active: Learning[]): { kept: LearningDraft[]; dropped: string[] } => {
   const source = [answer, ...facts.failures.map(f => `${f.command}\n${f.error}`)].join('\n')
+  const sources = [source, redact(source)]
   const activeIds = new Set(active.filter(l => l.status === 'active').map(l => l.id))
   const seen = new Set(active.map(l => squash(l.text).toLowerCase()))
   const kept: LearningDraft[] = []
   const dropped: string[] = []
   for (const d of drafts) {
     if (d.text === '') dropped.push('empty learning')
-    else if (!isQuoteOf(d.evidence, source)) dropped.push(`evidence not in the turn: ${d.text.slice(0, 40)}`)
+    else if (!sources.some(w => isQuoteOf(d.evidence, w))) dropped.push(`evidence not in the turn: ${d.text.slice(0, 40)}`)
     else if (seen.has(squash(d.text).toLowerCase())) dropped.push(`duplicate learning: ${d.text.slice(0, 40)}`)
     else {
       seen.add(squash(d.text).toLowerCase())

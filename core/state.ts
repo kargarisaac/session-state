@@ -75,7 +75,7 @@ const finish = (b: Block, state: State): void => {
 // Reads state.md back, so the person's edits stand. Anything it does not recognise outside "Your notes" is
 // dropped on the next write; nothing throws.
 export const parseState = (md: string): State => {
-  const { front, body } = parseFront(md)
+  const { front, body } = parseFront(md.replace(/\r\n?/g, '\n'))
   const state = emptyState(front)
   let section = ''
   let block: Block | undefined
@@ -84,13 +84,14 @@ export const parseState = (md: string): State => {
     block = undefined
   }
   for (const line of body.split('\n')) {
+    // "Your notes" is the last section: from its heading on, everything is the person's, blank lines and headings too.
+    if (section === SECTIONS.own) {
+      if (state.own.length > 0 || line.trim() !== '') state.own.push(line)
+      continue
+    }
     if (line.startsWith('## ')) {
       close()
       section = line.slice(3).trim()
-      continue
-    }
-    if (section === SECTIONS.own) {
-      if (line.trim() !== '') state.own.push(line)
       continue
     }
     const note = NOTE_HEAD.exec(line)
@@ -98,6 +99,11 @@ export const parseState = (md: string): State => {
     if (note !== null || learn !== null) {
       close()
       block = { head: (note ?? learn)!, isNote: note !== null, text: [], fields: {} }
+      continue
+    }
+    // A heading the person broke by hand ends the block above it and drops its own lines, so they cannot rewrite it.
+    if (line.startsWith('### ')) {
+      close()
       continue
     }
     if (section === SECTIONS.files) {
@@ -111,6 +117,7 @@ export const parseState = (md: string): State => {
     else block.text.push(line.trim())
   }
   close()
+  while (state.own.length > 0 && state.own[state.own.length - 1]!.trim() === '') state.own.pop()
   // state.md groups asks before rules; the ledger keeps them in id order.
   state.notes.sort((a, b) => a.id - b.id)
   return state
