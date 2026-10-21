@@ -10,7 +10,7 @@ import { processTurn } from '../core/pipeline'
 import { emptyState, HISTORY_HEAD, historyBlock, parseState, renderState, seedState } from '../core/state'
 import { appendStep, stepLines } from '../core/steps'
 import { answersOf, continuesFrom, parseTranscript, withAnswers } from '../core/transcript'
-import type { Config, State } from '../core/types'
+import type { Config, State, Turn } from '../core/types'
 import type { LedgerEvent, PendingTurn, Status, Tab } from '../types'
 import { gateLines, rows } from './format'
 import { configOf, hostOf } from './host'
@@ -121,6 +121,13 @@ const inherit = async ($: EngineInterface, here: string, folder: string, home: s
   }
 }
 
+// The turns of a transcript that are over: the last one is left out while its reply is still being written.
+const pastTurns = (transcript: string): Turn[] => {
+  const past = parseTranscript(transcript)
+  if (past.at(-1)?.answer === '') past.pop()
+  return past
+}
+
 const boot = async ($: EngineInterface, id: string): Promise<string> => {
   if ((await read($, sessionId)) === id) {
     const known = await read($, dir)
@@ -144,9 +151,8 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   let text = await readText($, stateOf(folder))
   if (ledger.length === 0 && pending.length === 0) {
     // The turns before the mod met this chat, read back from Claude Code's transcript and queued like live
-    // ones. The last turn is left out while its reply is still being written.
-    const past = parseTranscript(transcript)
-    if (past.at(-1)?.answer === '') past.pop()
+    // ones.
+    const past = pastTurns(transcript)
     if (past.length > 0) {
       const now = await $.clock.now()
       pending = past.slice(-BACKFILL_MAX)
@@ -446,6 +452,10 @@ export const register: Register = (on, options) => {
     if (arg === 'rebuild') {
       if ((await read($, status)).isBusy || (await read($, queue)).length > 0) return { text: 'Still recording turns; run rebuild when the queue is empty.' }
       const folder = await ensure($)
+      const home = (await $.env.get('HOME')) ?? ''
+      const transcript = await readText($, ((await frontOf($)).transcript ?? '').replace(/^~/, home))
+      // Nothing is set aside unless the transcript has turns to rebuild the ledger from.
+      if (pastTurns(transcript).length === 0) return { text: 'No earlier turns in the transcript to rebuild from. The ledger is unchanged.' }
       // The current files move to before-rebuild/, then the next boot reads the chat back from its transcript.
       for (const path of [stateOf(folder), stepsOf(folder), historyOf(folder), eventsOf(folder), pendingOf(folder)]) {
         const text = await readText($, path)
@@ -458,7 +468,7 @@ export const register: Register = (on, options) => {
       await ensure($)
       kick($, options)
       const queued = (await read($, queue)).length
-      return { text: queued === 0 ? 'No earlier turns in the transcript to rebuild from.' : `Rebuilding the ledger from the transcript: ${queued} turns queued. The old files are in before-rebuild/.` }
+      return { text: `Rebuilding the ledger from the transcript: ${queued} turns queued. The old files are in before-rebuild/.` }
     }
     if (arg === 'path') return { text: await ensure($) }
     if (arg === 'digest') return { text: await digestOf($) }

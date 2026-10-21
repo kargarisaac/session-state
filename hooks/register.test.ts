@@ -403,6 +403,23 @@ const compactToNewId = async ($: TestDollar, files: Map<string, string>, moveTo:
   files.set(`${PROJECT}/${CHILD}.jsonl`, boundary('last-of-old'))
 }
 
+test('rebuild leaves the ledger alone when the transcript has no turns to rebuild it from', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.1, [{ step: { text: 'Ran the tests.', outcome: 'ok' }, memories: [] }])
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'run the tests', 'All pass.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  // Claude Code's transcript for this chat is over 4 MiB, which $.fs.read refuses.
+  files.set(TRANSCRIPT, `${typed('u1', 'run the tests')}\n${'x'.repeat(READ_CAP)}`)
+
+  const out = await $.command.run({ command: 'session-state', args: 'rebuild' } as never)
+
+  expect(JSON.stringify(out)).toContain('No earlier turns')
+  expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ · Ran the tests.')
+  expect(files.get(EVENTS) ?? '').toContain('"turnId":"t1"')
+})
+
 test('a boot that failed once is tried again by the next hook', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   let isDown = true
