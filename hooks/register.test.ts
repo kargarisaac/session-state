@@ -596,3 +596,24 @@ test('the turn that Claude Code compacts in the middle of is still recorded, wit
   expect(steps).toContain('- t1 · ✓ ')
   expect(steps).toContain('edited core/parse.ts')
 })
+
+test('after a reload loses the loop that was recording, the queue is picked up again', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, holds } = world(on, 0.1, [])
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  // The first Haiku call never answers: the loop that made it is gone, as it is when the module reloads.
+  holds.haiku = new Promise<void>(() => {})
+  await say($, 'run the tests', 'All pass.', 1)
+  await clock.settle()
+  holds.haiku = undefined
+  const ui = await mountPane($)
+  expect(await textOf(ui)).toContain('recording t1')
+
+  // A reload runs session.start again; the atoms stay as they were.
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await settle(clock, files, f => f.has(STEPS))
+
+  expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ ')
+  expect(await textOf(ui)).not.toContain('recording t1')
+})

@@ -335,6 +335,9 @@ export const register: Register = (on, options) => {
       description: 'The ledger of this chat: open the panel (steps, ledger, stats), pause, retry, rebuild',
     }).catch(quiet)
     await ensure($).catch(quiet)
+    // The session starts, or the module reloaded: either way no loop of this copy is recording, whatever the
+    // atoms kept from the copy before. Without this a recording that the reload cut short blocks the queue for good.
+    await update($, status, () => ({ isBusy: false, turn: 0, message: '' })).catch(quiet)
     if ((await read($, queue)).length > 0) kick($, options)
     // Picks up the person's hand edits for the panel and wakes a stranded queue.
     $.clock.every(3000, async () => {
