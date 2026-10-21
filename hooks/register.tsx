@@ -178,12 +178,15 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   await update($, events, () => ledger)
   await update($, queue, () => pending)
   await update($, failed, () => [])
-  await update($, pendingUser, () => '')
   await update($, previousAnswer, () => pending.at(-1)?.answer ?? archive.at(-1)?.answer ?? '')
-  await update($, facts, () => emptyFacts())
   await update($, turns, () => Math.max(0, ...archive.map(r => r.turn), ...pending.map(t => t.turn)))
   await update($, status, () => ({ isBusy: false, turn: 0, message: '' }))
-  await update($, isCompacted, () => false)
+  // A compaction that moved the chat to this id leaves what it came in the middle of: the turn under way (the
+  // person's words and the tool facts so far) and the digest still owed to the next prompt.
+  if (!(await read($, isCompacted))) {
+    await update($, pendingUser, () => '')
+    await update($, facts, () => emptyFacts())
+  }
   return folder
 }
 

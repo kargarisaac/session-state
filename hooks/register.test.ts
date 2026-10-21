@@ -549,3 +549,50 @@ test('a poll that read state.md before a turn wrote it does not put the old text
 
   expect(await markdownOf(ui)).toContain('Use Postgres for storage.')
 })
+
+const NEW_ID = 'def67890-0000-0000-0000-000000000000'
+const NEW_FOLDER = `${ROOT}/demo/2026-10-17_def67890`
+const COMPACTED = { trigger: 'auto', messages: [{ role: 'user', text: 'summary', toolUses: [] }] } as never
+
+test('the digest still follows a compaction that moves the chat to a new session id', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  let id = ID
+  const { files, calls } = world(on, 0.95, [SQLITE], () => '/work/demo', () => id)
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  files.set(TRANSCRIPT, `${typed('u1', 'use SQLite')}\n${replied('Switched.')}\n${JSON.stringify({ type: 'assistant', uuid: 'last-of-old' })}`)
+  files.set(`/h/.claude/projects/-work-demo/${NEW_ID}.jsonl`, JSON.stringify({ type: 'system', subtype: 'compact_boundary', logicalParentUuid: 'last-of-old' }))
+
+  id = NEW_ID
+  await $.session.compact(COMPACTED)
+  await $.prompt.compose(COMPOSE)
+  await $.prompt.submit({ text: 'what next?' } as never)
+
+  const digest = calls.contexts.at(-1)?.[0]
+  expect(digest).toContain('The chat was just compacted.')
+  expect(digest).toContain('M-001 (t1) Use SQLite for storage.')
+  expect(digest).toContain(`Full ledger: ${NEW_FOLDER}/state.md`)
+})
+
+test('the turn that Claude Code compacts in the middle of is still recorded, with its tool facts', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  let id = ID
+  const { files } = world(on, 0.1, [], () => '/work/demo', () => id)
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await $.prompt.submit({ text: 'fix the parser' } as never)
+  await $.turn.start({ text: 'fix the parser', turnId: 't1' } as never)
+  await $.tool.call({ tool: 'Edit', file_path: '/work/demo/core/parse.ts', old_string: 'a', new_string: 'b', tool_use_id: 'u1' } as never)
+
+  id = NEW_ID
+  await $.session.compact(COMPACTED)
+  await $.prompt.compose(COMPOSE)
+  await $.turn.complete({ turnId: 't1', answer: 'Fixed.', durationMs: 10, isAborted: false } as never)
+  await settle(clock, files, f => f.has(`${NEW_FOLDER}/steps.md`))
+
+  const steps = files.get(`${NEW_FOLDER}/steps.md`) ?? ''
+  expect(steps).toContain('- t1 · ✓ ')
+  expect(steps).toContain('edited core/parse.ts')
+})
