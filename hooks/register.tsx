@@ -106,12 +106,12 @@ const parentFolder = async ($: EngineInterface, here: string, folder: string, ho
 }
 
 // A compaction that moved the chat to a new session id keeps its ledger: the old files are copied over, for this
-// session to carry on from. The old folder stays as it was.
-const inherit = async ($: EngineInterface, here: string, folder: string, home: string, transcript: string): Promise<void> => {
+// session to carry on from. The old folder stays as it was. Whether there was a ledger to carry on from.
+const inherit = async ($: EngineInterface, here: string, folder: string, home: string, transcript: string): Promise<boolean> => {
   const uuid = continuesFrom(transcript)
-  if (uuid === undefined) return
+  if (uuid === undefined) return false
   const parent = await parentFolder($, here, folder, home, uuid)
-  if (parent === undefined) return
+  if (parent === undefined) return false
   const front = await frontOf($)
   for (const pathOf of LEDGER_FILES) {
     const text = await readText($, pathOf(parent))
@@ -119,10 +119,13 @@ const inherit = async ($: EngineInterface, here: string, folder: string, home: s
     const own = pathOf === stateOf ? text.replace(/^(session_id|transcript|resume):.*$/gm, (_, key: string) => `${key}: ${front[key]}`) : text
     await $.fs.write(pathOf(folder), own).catch(quiet)
   }
+  return true
 }
 
 const boot = async ($: EngineInterface, id: string): Promise<string> => {
-  if ((await read($, sessionId)) === id) {
+  // Empty at the first boot and after a rebuild.
+  const previous = await read($, sessionId)
+  if (previous === id) {
     const known = await read($, dir)
     if (known !== '') return known
   }
@@ -137,7 +140,7 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   await update($, sessionId, () => id)
   await update($, dir, () => folder)
   await update($, origin, () => cwd)
-  if (found === undefined) await inherit($, here, folder, home, transcript)
+  const isInherited = found === undefined && (await inherit($, here, folder, home, transcript))
 
   let ledger = parseLedger(await readText($, eventsOf(folder)))
   let pending = parsePending(await readText($, pendingOf(folder)))
@@ -175,12 +178,16 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   await update($, events, () => ledger)
   await update($, queue, () => pending)
   await update($, failed, () => [])
-  await update($, pendingUser, () => '')
   await update($, previousAnswer, () => pending.at(-1)?.answer ?? archive.at(-1)?.answer ?? '')
-  await update($, facts, () => emptyFacts())
   await update($, turns, () => Math.max(0, ...archive.map(r => r.turn), ...pending.map(t => t.turn)))
   await update($, status, () => ({ isBusy: false, turn: 0, message: '' }))
-  await update($, isCompacted, () => false)
+  // A chat that carries on (a compaction under a new id, a rebuild) keeps the turn being written and a
+  // compaction the agent has not been told about; a /clear or a resume starts with neither.
+  if (previous !== '' && !isInherited) {
+    await update($, pendingUser, () => '')
+    await update($, facts, () => emptyFacts())
+    await update($, isCompacted, () => false)
+  }
   return folder
 }
 
