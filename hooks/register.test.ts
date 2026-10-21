@@ -649,3 +649,22 @@ test('a boot that failed once is tried again by the next hook', async ($, on) =>
 
   expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ · Ran the tests.')
 })
+
+test('a child that restarts keeps its own ledger and does not copy its parent again', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.1, [])
+  files.set(`${OLD_DIR}/state.md`, ledgerOf('old00001-0000', 'Use SQLite for storage.'))
+  files.set(`${PROJECT}/old00001-0000.jsonl`, last('last-of-old'))
+  // The child went on after the copy: its ledger has a note the parent's does not.
+  const own = `${ledgerOf(ID, 'Use SQLite for storage.')}\n### M-002 · decision · t2\nKeep answers short.\nSource: t2 · turn u2\n`
+  files.set(STATE, own)
+  files.set(TRANSCRIPT, boundary('last-of-old'))
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  const ui = await mountPane($)
+  await $.command.run({ command: 'session-state', args: 'ledger' } as never)
+  await ui.redraw()
+
+  expect(files.get(STATE)).toBe(own)
+  expect(JSON.stringify(await ui.findAll({ type: 'Markdown' } as never))).toContain('Keep answers short.')
+})
