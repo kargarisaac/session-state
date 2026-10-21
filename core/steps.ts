@@ -18,6 +18,9 @@ const STEP = /^- t(\d+) · /
 
 export const stepLines = (md: string): string[] => md.split('\n').filter(line => STEP.test(line))
 
+// The highest turn number steps.md holds: turns go on from there even when events.jsonl is missing.
+export const lastStep = (md: string): number => stepLines(md).reduce((top, line) => Math.max(top, Number(STEP.exec(line)?.[1])), 0)
+
 export const hasStep = (md: string, turn: number): boolean => stepLines(md).some(line => STEP.exec(line)?.[1] === String(turn))
 
 // steps.md is append-only: the new line goes under the last one.

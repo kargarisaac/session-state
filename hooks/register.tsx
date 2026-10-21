@@ -8,7 +8,7 @@ import { archivedTurns, parseLedger, parsePending, serializeLedger, serializePen
 import { activeNotes, newFront, parseOldNotes, pointerText, rulesText, upsertIndex } from '../core/notes'
 import { processTurn } from '../core/pipeline'
 import { emptyState, HISTORY_HEAD, historyBlock, parseState, renderState, seedState } from '../core/state'
-import { appendStep, stepLines } from '../core/steps'
+import { appendStep, lastStep, stepLines } from '../core/steps'
 import { answersOf, continuesFrom, hasMessage, parseTranscript, withAnswers } from '../core/transcript'
 import type { Config, State, Turn } from '../core/types'
 import type { LedgerEvent, PendingTurn, Status, Tab } from '../types'
@@ -174,17 +174,20 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   let ledger = parseLedger(await readText($, eventsOf(folder)))
   let pending = parsePending(await readText($, pendingOf(folder)))
   let text = await readText($, stateOf(folder))
+  const stepsMd = await readText($, stepsOf(folder))
   if (ledger.length === 0 && pending.length === 0) {
     // The turns before the mod met this chat, read back from Claude Code's transcript and queued like live
-    // ones.
-    const past = pastTurns(transcript)
+    // ones. A continuation numbers them on from the steps it was given.
+    const past = pastTurns(transcript).map(t => ({ ...t, turn: t.turn + (isContinued ? lastStep(stepsMd) : 0) }))
     if (past.length > 0) {
       const now = await $.clock.now()
       pending = past.slice(-BACKFILL_MAX)
       ledger = pending.map(t => turnRecord(t, now))
-      // The transcript is a fuller source than notes seeded from an older version.
-      if (text !== '') await $.fs.write(stateOf(folder), '').catch(quiet)
-      text = ''
+      // The transcript is a fuller source than notes seeded from an older version, but not than a parent's ledger.
+      if (!isContinued) {
+        if (text !== '') await $.fs.write(stateOf(folder), '').catch(quiet)
+        text = ''
+      }
       await $.fs.write(eventsOf(folder), serializeLedger(ledger)).catch(quiet)
       await $.fs.write(pendingOf(folder), serializePending(pending)).catch(quiet)
     }
@@ -201,14 +204,13 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   }
   const archive = archivedTurns(ledger)
   await update($, md, () => text)
-  const stepsMd = await readText($, stepsOf(folder))
   await update($, steps, () => stepsMd)
   await update($, events, () => ledger)
   await update($, queue, () => pending)
   // pendingUser and facts are not reset: a turn that is running now ends under this id, and they are its.
   if (!isContinued) await update($, failed, () => [])
   await update($, previousAnswer, () => pending.at(-1)?.answer ?? archive.at(-1)?.answer ?? '')
-  await update($, turns, () => Math.max(0, ...archive.map(r => r.turn), ...pending.map(t => t.turn)))
+  await update($, turns, () => Math.max(0, ...archive.map(r => r.turn), ...pending.map(t => t.turn), lastStep(stepsMd)))
   // A turn may be being written up right now; isBusy is the drain's to clear.
   await update($, status, s => ({ ...s, message: '' }))
   // A chat that was compacted still owes the agent its digest, under the new id too.

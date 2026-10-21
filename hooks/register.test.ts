@@ -518,6 +518,44 @@ test('a parent that started long before the newest twelve folders is found by wh
   expect(files.get(STATE) ?? '').toContain('Use SQLite for storage.')
 })
 
+test('a live turn is numbered after the copied steps when the parent kept no events', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.1, [{ step: { text: 'Added the tests.', outcome: 'ok' }, memories: [] }])
+  files.set(`${OLD_DIR}/state.md`, ledgerOf('old00001-0000', 'Use SQLite for storage.'))
+  files.set(`${OLD_DIR}/steps.md`, '# Steps\n- t1 · ✓ · Chose SQLite.\n- t2 · ✓ · Ran the tests.\n- t3 · ✓ · Fixed the parser.\n')
+  files.set(`${PROJECT}/old00001-0000.jsonl`, last('last-of-old'))
+  files.set(TRANSCRIPT, boundary('last-of-old'))
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'add the tests', 'Added.', 4)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t4'))
+
+  expect(turnsOf(files.get(STEPS))).toEqual(['- t1', '- t2', '- t3', '- t4'])
+  expect(files.get(STEPS) ?? '').toContain('- t4 · ✓ · Added the tests.')
+})
+
+test('turns the new session already ran are numbered after the copied steps', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.1, [
+    { step: { text: 'Wrote the docs.', outcome: 'ok' }, memories: [] },
+    { step: { text: 'Added the tests.', outcome: 'ok' }, memories: [] },
+  ])
+  files.set(`${OLD_DIR}/state.md`, ledgerOf('old00001-0000', 'Use SQLite for storage.'))
+  files.set(`${OLD_DIR}/steps.md`, '# Steps\n- t1 · ✓ · Chose SQLite.\n- t2 · ✓ · Ran the tests.\n- t3 · ✓ · Fixed the parser.\n')
+  files.set(`${PROJECT}/old00001-0000.jsonl`, last('last-of-old'))
+  // The new session already ran one turn before the mod met it.
+  files.set(TRANSCRIPT, [boundary('last-of-old'), typed('u9', 'write the docs'), replied('Done.')].join('\n'))
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t4'))
+  await say($, 'add the tests', 'Added.', 5)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t5'))
+
+  expect(turnsOf(files.get(STEPS))).toEqual(['- t1', '- t2', '- t3', '- t4', '- t5'])
+  expect(files.get(STEPS) ?? '').toContain('- t4 · ✓ · Wrote the docs.')
+  expect(files.get(STEPS) ?? '').toContain('- t5 · ✓ · Added the tests.')
+})
+
 // Haiku takes a while to write up a turn; the chat can move to a new session id while it does.
 for (const ms of [2000, 5000]) {
   test(`a turn still being written up when the chat moves to a new session id lands in the new ledger once (${ms} ms)`, async ($, on) => {
