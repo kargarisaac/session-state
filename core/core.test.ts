@@ -276,6 +276,47 @@ test('state.md round-trips rich notes, learnings, roles and the person\'s own li
   expect(next.state.notes.map(n => n.id)).toEqual([1, 3])
 })
 
+// A state.md with two notes, a learning, a role and a line of the person's own.
+const richMd = (): string => {
+  let { state } = applyMemories(
+    fresh(),
+    [memory('Use SQLite for storage.', 'use SQLite', { why: 'One file.', context: 'Choosing the store.' }), memory('Rename the video.', 'rename it', { kind: 'ask' })],
+    3,
+    'turn-uuid-123456',
+    'Storage choice',
+  )
+  state = applyLearnings(state, [{ kind: 'failed', text: 'Bun test needs the runner.', why: 'imports', evidence: 'Cannot find module', replaces: [] }], 3).state
+  state = applyFileRoles(state, [{ path: `${CWD}/core/state.ts`, role: 'Reads and writes state.md' }])
+  return renderState({ ...state, own: ['- ship on friday'] }, richFiles)
+}
+const richFiles = fileIndex([turnRecord(turn('x', 3, { facts: withFacts({ edited: [`${CWD}/core/state.ts`] }) }), 0)])
+
+test('a state.md saved with Windows line endings reads the same as one with Unix endings', async () => {
+  const md = richMd()
+  const crlf = parseState(md.replace(/\n/g, '\r\n'))
+  expect(crlf).toEqual(parseState(md))
+  expect(renderState(crlf, richFiles)).toBe(md)
+  expect(crlf.notes.map(n => n.why)).toEqual(['One file.', ''])
+  expect(crlf.front.title).toBe('Storage choice')
+  expect(Object.keys(crlf.roles)).toEqual(['core/state.ts'])
+})
+
+test('everything the person writes under "Your notes" is kept: blank lines, sub-headings and what follows them', async () => {
+  const hand = `${richMd()}\n- second para\n\n## Todo\n- item under a heading\n`
+  const state = parseState(hand)
+  expect(state.own).toEqual(['- ship on friday', '', '- second para', '', '## Todo', '- item under a heading'])
+  const again = renderState(state, [])
+  expect(again).toContain('## Your notes\n- ship on friday\n\n- second para\n\n## Todo\n- item under a heading\n')
+  expect(renderState(parseState(again), [])).toBe(again)
+})
+
+test('a note heading the person broke does not take over the note above it', async () => {
+  const two = applyMemories(fresh(), [memory('Use SQLite.', 'use SQLite', { why: 'One file.' }), memory('Keep answers short.', 'short', { why: 'Less to read.' })], 3, '', '').state
+  const md = renderState(two, []).replace('### M-002 · decision · t3', '### M-002 · decision')
+  const state = parseState(md)
+  expect(state.notes.map(n => [n.id, n.text, n.why])).toEqual([[1, 'Use SQLite.', 'One file.']])
+})
+
 test('replaced and finished items move to history with what replaced them; only asks can finish', async () => {
   let { state } = applyMemories(fresh(), [memory('Use Postgres.', 'q'), memory('Rename the video.', 'q', { kind: 'ask' })], 1, '', '')
   expect(openAsks(state).map(n => n.id)).toEqual([2])
