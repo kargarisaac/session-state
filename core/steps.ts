@@ -20,9 +20,10 @@ export const stepLines = (md: string): string[] => md.split('\n').filter(line =>
 
 export const hasStep = (md: string, turn: number): boolean => stepLines(md).some(line => STEP.exec(line)?.[1] === String(turn))
 
-// steps.md is append-only: the new line goes under the last one.
+// steps.md is append-only: the new line goes under the last one. A turn run again (a retry after Haiku failed)
+// replaces its own line where it stands.
 export const appendStep = (md: string, step: Step): string => {
-  if (hasStep(md, step.turn)) return md
+  if (hasStep(md, step.turn)) return md.split('\n').map(line => (STEP.exec(line)?.[1] === String(step.turn) ? stepLine(step) : line)).join('\n')
   const base = md === '' ? STEPS_HEAD : md.endsWith('\n') ? md : `${md}\n`
   return `${base}${stepLine(step)}\n`
 }

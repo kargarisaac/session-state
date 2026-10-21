@@ -337,6 +337,16 @@ test('steps.md is append-only, one line per turn', async () => {
   expect(stepLines(two)).toEqual(['- t4 · ✓ · Moved the parser. · edited a.ts · +M-003 · done M-001', '- t5 · ◌ · Moved the parser.'])
 })
 
+test('a turn run again after Haiku failed replaces its own step line, in place', async () => {
+  const at = (turn: number, text: string, added: string[] = []) => ({ turn, outcome: 'ok' as const, text, facts: '', added, done: [] })
+  let md = ''
+  for (const step of [at(3, 'Ran the tests.'), at(4, 'Asked: use SQLite'), at(5, 'Wrote the docs.')]) md = appendStep(md, step)
+  const better = at(4, 'Switched storage to SQLite.', ['M-007'])
+  const again = appendStep(md, better)
+  expect(stepLines(again)).toEqual(['- t3 · ✓ · Ran the tests.', '- t4 · ✓ · Switched storage to SQLite. · +M-007', '- t5 · ✓ · Wrote the docs.'])
+  expect(appendStep(again, better)).toBe(again)
+})
+
 test('an old single-file notes file seeds the ledger with its active notes only', async () => {
   const old =
     '---\nsession_id: x\ntitle: Video work\nnext_id: 4\n---\n# Video work\n' +

@@ -75,6 +75,8 @@ const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = (
   on('model.complete', (_$, e) => {
     calls.efforts.push(String((e as { effort?: string }).effort))
     const next = replies[calls.haiku++] ?? { step: { text: 'Answered.', outcome: 'ok' }, memories: [] }
+    // A reply of { fail: true } is Haiku being overloaded.
+    if ('fail' in next) return { value: { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: USAGE } } as never
     return { value: { isAnswered: true, text: JSON.stringify(next), usage: USAGE } } as never
   })
   return { files, calls }
@@ -357,4 +359,22 @@ test('rebuild sets the current files aside and reads the whole chat back from th
   const lines = (files.get(STEPS) ?? '').split('\n').filter(l => l.startsWith('- t'))
   expect(lines).toEqual(['- t1 · ✓ · Chose SQLite.', '- t2 · ✓ · Ran the tests.'])
   expect(files.get(`${FOLDER}/before-rebuild/steps.md`) ?? '').toContain('Live turn seen late.')
+})
+
+test('retry runs a failed turn again and rewrites its step line with what it found', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, calls } = world(on, 0.95, [{ fail: true }, { fail: true }, SQLITE])
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ · Asked: Please use SQLite from now on.')
+  const out = await $.command.run({ command: 'session-state', args: 'retry' } as never)
+  expect(JSON.stringify(out)).toContain('Retrying 1 turn.')
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('+M-001'))
+
+  const lines = (files.get(STEPS) ?? '').split('\n').filter(l => l.startsWith('- t'))
+  expect(lines).toEqual(['- t1 · ✓ · Switched storage to SQLite. · +M-001'])
+  expect(files.get(STATE) ?? '').toContain('### M-001 · decision · t1')
+  expect(calls.haiku).toBe(3)
 })
