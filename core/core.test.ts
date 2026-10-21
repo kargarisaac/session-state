@@ -162,6 +162,12 @@ test('tool calls become the turn facts: reads, edits, failed commands and commit
   expect(factsText(f, CWD)).toBe('edited b.ts · read 1 file · 2 commands, 1 failed · commit 3fa2c1b Fix parser')
 })
 
+test('a read that failed is not a file the chat touched', async () => {
+  const f = addToolCall(emptyFacts(), { tool: 'Read', input: { file_path: `${CWD}/missing.ts` }, isError: true, text: 'File does not exist.' })
+  expect(f.read).toEqual([])
+  expect(factsText(f, CWD)).toBe('')
+})
+
 // ---- parsing and checking Haiku's reply
 
 test('the reply parses: fenced JSON, every section, and "M-002", "L-1", "t40" style ids', async () => {

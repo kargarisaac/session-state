@@ -27,7 +27,7 @@ const commitOf = (command: string, text: string): string => {
 
 // Folds one finished tool call into the turn's facts. Pure.
 export const addToolCall = (f: TurnFacts, call: ToolCall): TurnFacts => {
-  if (call.tool === 'Read') return { ...f, read: add(f.read, pathOf(call.input)) }
+  if (call.tool === 'Read') return call.isError ? f : { ...f, read: add(f.read, pathOf(call.input)) }
   if (EDIT_TOOLS.has(call.tool)) return call.isError ? f : { ...f, edited: add(f.edited, pathOf(call.input)) }
   if (call.tool !== 'Bash') return f
   const command = typeof call.input.command === 'string' ? call.input.command : ''
