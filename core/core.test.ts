@@ -508,6 +508,18 @@ test('Haiku failing twice keeps the state, records the error, and the step falls
   expect(out.events[1]).toMatchObject({ type: 'extract', kept: 0, error: 'haiku: no scripted reply' })
 })
 
+test('a Haiku call that throws counts as a failed attempt: the turn still gets its step line and an error event', async () => {
+  const { host, calls } = fakeHost(0.95, [])
+  host.complete = async () => {
+    calls.complete += 1
+    throw new Error('model is blocked')
+  }
+  const out = await processTurn(host, config(), ledgerOf(fresh()), turn('use SQLite'))
+  expect(calls.complete).toBe(2)
+  expect(out.step.text).toBe('Asked: use SQLite')
+  expect(out.events[1]).toMatchObject({ type: 'extract', kept: 0, error: 'haiku: threw Error: model is blocked' })
+})
+
 test('one turn can finish an ask, record a learning, name a file and replace a decision', async () => {
   const seed = applyMemories(fresh(), [memory('Rename the video.', 'q', { kind: 'ask' }), memory('Use Postgres.', 'q')], 1, '', '').state
   const facts = withFacts({ edited: [`${CWD}/video.ts`], commands: 1, failures: [{ command: 'ffmpeg -i a', error: 'codec not found' }] })

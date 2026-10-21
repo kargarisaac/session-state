@@ -7,7 +7,7 @@ import { runGate } from './gate'
 import { addUsage, emptyUsage } from './ledger'
 import { activeNotes, applyMemories, openAsks } from './notes'
 import { applyFileRoles, applyLearnings, learnLabel, noteLabel } from './state'
-import type { Config, ExtractEvent, FileEntry, Host, LedgerEvent, Moved, State, Step, Turn, TurnRecord } from './types'
+import type { CompleteResult, Config, ExtractEvent, FileEntry, Host, LedgerEvent, Moved, State, Step, Turn, TurnRecord } from './types'
 
 export type Ledger = { state: State; steps: readonly string[]; archive: readonly TurnRecord[]; files: readonly FileEntry[] }
 
@@ -33,7 +33,12 @@ export const processTurn = async (host: Host, config: Config, ledger: Ledger, tu
 
   const ask = async (prompt: string): Promise<Extraction | undefined> => {
     for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
-      const reply = await host.complete({ system, prompt, effort })
+      let reply: CompleteResult
+      try {
+        reply = await host.complete({ system, prompt, effort })
+      } catch (err) {
+        reply = { isOk: false, reason: `threw ${String(err).slice(0, 120)}`, usage: emptyUsage() }
+      }
       usage = addUsage(usage, reply.usage)
       if (!reply.isOk) {
         failure = `haiku: ${reply.reason}`
