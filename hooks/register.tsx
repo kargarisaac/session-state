@@ -189,7 +189,14 @@ let booting: { id: string; run: Promise<string> } | undefined
 
 const ensure = async ($: EngineInterface): Promise<string> => {
   const id = await $.session.id()
-  if (booting === undefined || booting.id !== id) booting = { id, run: boot($, id) }
+  if (booting === undefined || booting.id !== id) {
+    const run = boot($, id)
+    booting = { id, run }
+    // A boot that failed is tried again by the next hook, not kept as the answer for the rest of the session.
+    run.catch(() => {
+      if (booting?.run === run) booting = undefined
+    })
+  }
   return booting.run
 }
 

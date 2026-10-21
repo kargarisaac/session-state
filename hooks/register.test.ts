@@ -402,3 +402,19 @@ const compactToNewId = async ($: TestDollar, files: Map<string, string>, moveTo:
   moveTo()
   files.set(`${PROJECT}/${CHILD}.jsonl`, boundary('last-of-old'))
 }
+
+test('a boot that failed once is tried again by the next hook', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  let isDown = true
+  const { files } = world(on, 0.1, [{ step: { text: 'Ran the tests.', outcome: 'ok' }, memories: [] }], () => {
+    if (isDown) throw new Error('no session yet')
+    return '/work/demo'
+  })
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  isDown = false
+  await say($, 'run the tests', 'All pass.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+
+  expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ · Ran the tests.')
+})
