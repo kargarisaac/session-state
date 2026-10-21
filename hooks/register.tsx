@@ -301,7 +301,7 @@ const isHere = async ($: EngineInterface, folder: string): Promise<boolean> => (
 
 // Says whether the turn is done. It is not when the chat moved to a new session id while Haiku was writing it up:
 // nothing is written then, and the turn stays queued in the folder that has it (a compaction's new session has
-// inherited that queue, so it is handled again there).
+// inherited that queue, so it is handled again there). The same when the chat moves during the writes.
 const handle = async ($: EngineInterface, config: Config, turn: PendingTurn, folder: string): Promise<boolean> => {
   const state = loadState(await readText($, stateOf(folder)), await frontOf($))
   const stepsMd = await readText($, stepsOf(folder))
@@ -335,7 +335,9 @@ const handle = async ($: EngineInterface, config: Config, turn: PendingTurn, fol
   await update($, steps, () => nextSteps)
   await writeIndex($, folder, outcome.state, stepLines(nextSteps).length).catch(quiet)
   if (outcome.events.some(isFailure)) await update($, failed, list => [...list, turn].slice(-MAX_FAILED))
-  return true
+  // The chat can move on while these files are written. The folder it left has the turn, but the new one may have
+  // copied that folder before, so the turn stays in the new queue (a copy that has it skips it).
+  return isHere($, folder)
 }
 
 // Runs outside any hook's budget, one turn at a time, so the next prompt is never held up.
@@ -350,7 +352,9 @@ const drain = async ($: EngineInterface, config: Config): Promise<void> => {
   if (!isClaimed) return
   try {
     for (;;) {
-      // The queue in the atoms is the loaded chat's, and so is the folder: both are read again for each turn.
+      // A boot sets the folder first and the queue last. Read in between, they belong to two different chats, and a
+      // turn would be recorded over the ledger that is still being copied. Wait for it, then read both again.
+      await booting?.run.catch(quiet)
       const folder = await read($, dir)
       const next = (await read($, queue))[0]
       if (next === undefined) break
@@ -364,8 +368,11 @@ const drain = async ($: EngineInterface, config: Config): Promise<void> => {
         await update($, status, s => ({ ...s, message: `error: ${String(err).slice(0, 140)}` }))
         await update($, failed, list => [...list, next].slice(-MAX_FAILED))
       }
-      if (isDone) await update($, queue, list => list.slice(1))
-      await savePending($).catch(quiet)
+      // A turn left queued is the other chat's to write down: the queue and its file are not touched.
+      if (isDone) {
+        await update($, queue, list => list.slice(1))
+        await savePending($).catch(quiet)
+      }
     }
   } finally {
     await update($, status, s => ({ ...s, isBusy: false }))

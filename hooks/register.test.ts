@@ -1731,3 +1731,99 @@ test('a Jev request that never answers does not stall the queue: the gate fails 
   expect(events).toContain('"mode":"extract"')
   expect(calls.haiku).toBe(2)
 })
+
+// ---- the integrated flows: a compaction, a recording and a boot at the same time
+
+test('a turn that ends under the old session id while the new one is still copying the ledger does not wipe it', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  let id = ID
+  let latency = 0
+  const plain = (text: string) => ({ step: { text, outcome: 'ok' }, memories: [] })
+  const { files, holds } = world(on, 0.95, [SQLITE, plain('Ran the tests.'), plain('Ran the tests.'), plain('Fixed the parser.')], () => '/work/demo', () => id, () => clock.sleep(latency))
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  latency = 2000
+  await say($, 'run the tests', 'All pass.', 2)
+  await say($, 'fix the parser', 'Fixed.', 3)
+  await clock.advance(500)
+  await compactToNewId($, files, () => (id = CHILD))
+  // The boot of the new id has set its folder and waits to read the old ledger, as a slow disk would.
+  let release = () => {}
+  holds.reads.set(STATE, new Promise<void>(resolve => (release = resolve)))
+  const booted = $.prompt.compose(COMPOSE)
+  await clock.advance(2500)
+  release()
+  await booted
+  await clock.advance(30000)
+
+  expect(turnsOf(files.get(`${CHILD_DIR}/steps.md`))).toEqual(['- t1', '- t2', '- t3'])
+  expect(files.get(`${CHILD_DIR}/state.md`) ?? '').toContain('Use SQLite for storage.')
+  expect(JSON.parse(files.get(`${CHILD_DIR}/pending.json`) ?? '[]')).toEqual([])
+})
+
+test('a /clear while a turn is being recorded does not queue it in the new chat that is still booting', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  let id = ID
+  const { files, stall, holds } = world(on, 0.1, [], () => '/work/demo', () => id)
+  let releaseHaiku = () => {}
+  stall.until = new Promise<void>(resolve => (releaseHaiku = resolve))
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'run the tests', 'All pass.', 1)
+  await clock.advance(1)
+  const exit = $.session.end({ reason: 'clear', sessionId: ID, resume: { id: ID } } as never)
+  for (let i = 0; i < 45; i++) await clock.advance(200)
+  await exit
+  id = CHILD
+  // The new chat has set its folder and is slow to read what the folder holds.
+  let release = () => {}
+  holds.reads.set(`${CHILD_DIR}/events.jsonl`, new Promise<void>(resolve => (release = resolve)))
+  const booted = $.prompt.submit({ text: 'a fresh start' } as never)
+  await clock.advance(10)
+  releaseHaiku()
+  await clock.advance(100)
+  release()
+  await booted
+  await clock.advance(30000)
+
+  expect(turnsOf(files.get(`${CHILD_DIR}/steps.md`))).toEqual([])
+  expect(files.get(`${CHILD_DIR}/events.jsonl`) ?? '').not.toContain('run the tests')
+  expect(JSON.parse(files.get(`${CHILD_DIR}/pending.json`) || '[]')).toEqual([])
+})
+
+test('a turn whose recording is cut across by a compaction is not dropped from the new session id\'s queue', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  let id = ID
+  const plain = { step: { text: 'Ran the tests.', outcome: 'ok' }, memories: [] }
+  const { files, holds } = world(on, 0.1, [plain, plain, plain], () => '/work/demo', () => id)
+  // The first write of the archive after `isArmed` waits, as one that takes longer than a neighbour's does.
+  let isArmed = false
+  let isHeld = false
+  let release = () => {}
+  on('state.set', { plugin: 'session-state', key: 'events' }, async (_$, e, next) => {
+    if (isArmed && !isHeld) {
+      isHeld = true
+      await new Promise<void>(resolve => (release = resolve))
+    }
+    return next(e)
+  })
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  let releaseHaiku = () => {}
+  holds.haiku = new Promise<void>(resolve => (releaseHaiku = resolve))
+  await say($, 'run the tests', 'All pass.', 1)
+  await clock.settle()
+  isArmed = true
+  releaseHaiku()
+  await clock.settle()
+  expect(isHeld).toBe(true)
+  // The recording has passed its check that the chat is still here, and waits to save the archive. The chat moves on.
+  await compactToNewId($, files, () => (id = CHILD))
+  await $.prompt.compose(COMPOSE)
+  release()
+  await clock.advance(30000)
+
+  expect(turnsOf(files.get(`${CHILD_DIR}/steps.md`))).toEqual(['- t1'])
+})
