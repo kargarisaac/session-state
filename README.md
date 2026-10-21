@@ -29,7 +29,7 @@ Work as usual. Then:
 - `/session-state` opens one side panel with three tab buttons at the top: **Steps** (one line per turn), **Ledger** (`state.md`, with a button for `history.md`) and **Stats** (models, counts, cost).
 - `/session-state steps | ledger | stats` opens the panel on that tab.
 - `/session-state close | pause | resume | retry | path | digest` closes the panel, stops recording, resumes, re-runs failed turns, prints the folder, or prints what the agent gets after a compaction.
-- `/session-state rebuild` moves the chat's ledger files to `before-rebuild/` and reads the whole chat again from Claude Code's transcript.
+- `/session-state rebuild` moves the chat's ledger files to `before-rebuild/` and reads the whole chat again from Claude Code's transcript. It leaves the files alone when the transcript has no turns to read.
 - Ask the agent "what did I decide about X?" and it reads the ledger.
 
 **Steps:** one line per turn, with what the tools did and what the turn added (`+M-002`) or finished (`done M-002`).
@@ -66,9 +66,9 @@ Quote: "Folder, split files"
 Source: t41 · turn 3f2a9c1b · answers t40
 ```
 
-When Claude Code auto-compacts a chat and carries on under a new session id, the new session starts from a copy of the old session's ledger (found through the compaction boundary at the top of the new transcript) and keeps numbering its turns from there. The old folder is left as it was.
+When Claude Code auto-compacts a chat and carries on under a new session id, the new session starts from a copy of the old session's ledger and keeps numbering its turns from there: the folder this session was recording into or, failing that, the folder whose transcript holds the message that the compaction boundary at the top of the new transcript points back to. The agent still gets the digest on your next message. The old folder is left as it was.
 
-A chat the mod meets part-way (installed or upgraded mid-chat, or resumed) is read back from Claude Code's transcript: its last 100 turns are queued like live ones, so each gets a step line and its notes in the background, with the right turn numbers. Only when there is no transcript does a notes file from an older version (`<date>_<id8>.md`) seed the folder. Old files are left as they were.
+A chat the mod meets part-way (installed or upgraded mid-chat, or resumed) is read back from Claude Code's transcript: its last 100 turns are queued like live ones, so each gets a step line and its notes in the background, with the right turn numbers. A mod cannot read a file over 4 MiB, so a chat whose transcript is bigger than that is not read back. Only when there is no transcript does a notes file from an older version (`<date>_<id8>.md`) seed the folder. Old files are left as they were.
 
 ## How it works
 
