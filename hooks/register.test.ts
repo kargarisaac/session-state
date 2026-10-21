@@ -668,3 +668,51 @@ test('a child that restarts keeps its own ledger and does not copy its parent ag
   expect(files.get(STATE)).toBe(own)
   expect(JSON.stringify(await ui.findAll({ type: 'Markdown' } as never))).toContain('Keep answers short.')
 })
+
+const SHORT = {
+  step: { text: 'Kept answers short.', outcome: 'ok' },
+  memories: [{ kind: 'decision', text: 'Keep answers short.', why: '', context: '', quote: 'keep answers short', refers_to: [], supersedes: [] }],
+}
+
+test('a chat compacted twice in one process carries the ledger of the newest session, with all its notes', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const THIRD = 'thr00003-0000-0000-0000-000000000000'
+  const THIRD_DIR = `${ROOT}/demo/2026-10-17_thr00003`
+  let id = ID
+  const { files } = world(on, 0.95, [SQLITE, SHORT, { step: { text: 'Wrote the docs.', outcome: 'ok' }, memories: [] }], () => '/work/demo', () => id)
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  await compactToNewId($, files, () => (id = CHILD))
+  await say($, 'keep answers short', 'Ok.', 2)
+  await settle(clock, files, f => (f.get(`${CHILD_DIR}/steps.md`) ?? '').includes('- t2'))
+  files.set(`${PROJECT}/${CHILD}.jsonl`, `${boundary('last-of-old')}\n${last('last-of-second')}`)
+  await $.session.compact({ trigger: 'auto', messages: SUMMARY } as never)
+  id = THIRD
+  files.set(`${PROJECT}/${THIRD}.jsonl`, boundary('last-of-second'))
+  await say($, 'write the docs', 'Done.', 3)
+  await settle(clock, files, f => (f.get(`${THIRD_DIR}/steps.md`) ?? '').includes('- t3'))
+
+  const md = files.get(`${THIRD_DIR}/state.md`) ?? ''
+  expect(md).toContain('Use SQLite for storage.')
+  expect(md).toContain('Keep answers short.')
+  expect(turnsOf(files.get(`${THIRD_DIR}/steps.md`))).toEqual(['- t1', '- t2', '- t3'])
+})
+
+test('a session met after two compactions copies the second session, not the first', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const { files, written } = world(on, 0.1, [])
+  const FIRST_DIR = `${ROOT}/demo/2026-10-15_aaa00001`
+  files.set(`${FIRST_DIR}/state.md`, ledgerOf('aaa00001-0000', 'Use SQLite for storage.'))
+  files.set(`${PROJECT}/aaa00001-0000.jsonl`, last('last-of-first'))
+  files.set(`${OLD_DIR}/state.md`, `${ledgerOf('old00001-0000', 'Use SQLite for storage.')}\n### M-002 · decision · t2\nKeep answers short.\nSource: t2 · turn u2\n`)
+  files.set(`${PROJECT}/old00001-0000.jsonl`, `${boundary('last-of-first')}\n${last('last-of-second')}`)
+  files.set(TRANSCRIPT, boundary('last-of-second'))
+  written.set(`${FIRST_DIR}/state.md`, 1)
+  written.set(`${OLD_DIR}/state.md`, 2)
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+
+  expect(files.get(STATE) ?? '').toContain('Keep answers short.')
+})
