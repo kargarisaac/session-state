@@ -119,7 +119,7 @@ const holdsMessage = async ($: EngineInterface, home: string, folder: string, uu
   if (text !== '') return hasMessage(text, uuid)
   if (!/^[A-Za-z0-9-]{1,64}$/.test(uuid)) return false
   try {
-    const found = await $.process.run(['grep', '-q', '-E', '-e', `"uuid"[[:space:]]*:[[:space:]]*"${uuid}"`, path])
+    const found = await $.process.run(['grep', '-q', '-E', '-e', `"uuid"[[:space:]]*:[[:space:]]*"${uuid}"`, '--', path])
     return found.exitCode === 0
   } catch {
     return false

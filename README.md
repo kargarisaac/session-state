@@ -70,7 +70,7 @@ Source: t41 · turn 3f2a9c1b · answers t40
 
 When Claude Code auto-compacts a chat and carries on under a new session id, the new session starts from a copy of the old session's ledger and keeps numbering its turns from there: the folder this session was recording into or, failing that, the folder whose transcript holds the message that the compaction boundary at the top of the new transcript points back to. The agent still gets the digest on your next message. The old folder is left as it was.
 
-A chat the mod meets part-way (installed or upgraded mid-chat, or resumed) is read back from Claude Code's transcript: its last 100 turns are queued like live ones, so each gets a step line and its notes in the background, with the right turn numbers. A mod cannot read a file over 4 MiB, so a chat whose transcript is bigger than that is not read back. Only when there is no transcript does a notes file from an older version (`<date>_<id8>.md`) seed the folder. Old files are left as they were.
+A chat the mod meets part-way (installed or upgraded mid-chat, or resumed) is read back from Claude Code's transcript: its last 100 turns are queued like live ones, so each gets a step line and its notes in the background, with the right turn numbers. A mod cannot read a file over 4 MiB, so a chat whose transcript is bigger than that is not read back. Only when no turns can be read back from the transcript (there is none, or it is that big) does a notes file from an older version (`<date>_<id8>.md`) seed the folder. Old files are left as they were.
 
 ## How it works
 

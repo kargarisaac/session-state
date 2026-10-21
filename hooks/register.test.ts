@@ -411,6 +411,7 @@ const PROJECT = '/h/.claude/projects/-work-demo'
 const CHILD_DIR = `${ROOT}/demo/2026-10-17_new00002`
 const OLD_DIR = `${ROOT}/demo/2026-10-16_old00001`
 const SUMMARY = [{ role: 'user', text: 'summary', toolUses: [] }]
+const COMPACT = { trigger: 'auto', messages: SUMMARY } as never
 const last = (uuid: string) => JSON.stringify({ type: 'assistant', uuid })
 const boundary = (uuid: string) => JSON.stringify({ type: 'system', subtype: 'compact_boundary', logicalParentUuid: uuid })
 const turnsOf = (steps: string | undefined) => (steps ?? '').split('\n').filter(l => l.startsWith('- t')).map(l => l.split(' · ')[0])
@@ -423,29 +424,10 @@ const ledgerOf = (id: string, note: string) =>
 // whose transcript opens with a compact boundary that points back at that message.
 const compactToNewId = async ($: TestDollar, files: Map<string, string>, moveTo: () => void, oldTranscript = last('last-of-old')) => {
   files.set(`${PROJECT}/${ID}.jsonl`, oldTranscript)
-  await $.session.compact({ trigger: 'auto', messages: SUMMARY } as never)
+  await $.session.compact(COMPACT)
   moveTo()
   files.set(`${PROJECT}/${CHILD}.jsonl`, boundary('last-of-old'))
 }
-
-test('after a compaction that moved the chat to a new session id, the next prompt still carries the digest', async ($, on) => {
-  const clock = mock.clock(on, { now: NOW })
-  let id = ID
-  const { files, calls } = world(on, 0.95, [SQLITE], () => '/work/demo', () => id)
-
-  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
-  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
-  await settle(clock, files, f => f.has(STEPS))
-  await compactToNewId($, files, () => (id = CHILD))
-  await $.prompt.submit({ text: 'what next?' } as never)
-  await $.prompt.submit({ text: 'and then?' } as never)
-
-  const [digest, after] = calls.contexts.slice(-2)
-  expect(digest?.[0]).toContain('The chat was just compacted.')
-  expect(digest?.[0]).toContain('M-001 (t1) Use SQLite for storage.')
-  expect(digest?.[0]).toContain(`Full ledger: ${CHILD_DIR}/state.md`)
-  expect(after ?? []).toEqual([])
-})
 
 test('a turn that is running when the compaction moves the chat to a new session id is still recorded', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
@@ -638,7 +620,7 @@ test('a /clear after a compaction starts an empty ledger and carries no digest',
   await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
   await say($, 'Please use SQLite from now on.', 'Switched.', 1)
   await settle(clock, files, f => f.has(STEPS))
-  await $.session.compact({ trigger: 'auto', messages: SUMMARY } as never)
+  await $.session.compact(COMPACT)
   await $.session.end({ reason: 'clear', sessionId: ID, resume: { id: ID } } as never)
   id = CHILD
   await $.prompt.submit({ text: 'a fresh start' } as never)
@@ -655,7 +637,7 @@ test('resuming an unrelated chat after a compaction does not take the ledger of 
   await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
   await say($, 'Please use SQLite from now on.', 'Switched.', 1)
   await settle(clock, files, f => f.has(STEPS))
-  await $.session.compact({ trigger: 'auto', messages: SUMMARY } as never)
+  await $.session.compact(COMPACT)
   id = CHILD
   files.set(`${PROJECT}/${CHILD}.jsonl`, [typed('r1', 'an old question'), replied('An old answer.')].join('\n'))
   await $.prompt.submit({ text: 'carry on' } as never)
@@ -735,7 +717,7 @@ test('a chat compacted twice in one process carries the ledger of the newest ses
   await say($, 'keep answers short', 'Ok.', 2)
   await settle(clock, files, f => (f.get(`${CHILD_DIR}/steps.md`) ?? '').includes('- t2'))
   files.set(`${PROJECT}/${CHILD}.jsonl`, `${boundary('last-of-old')}\n${last('last-of-second')}`)
-  await $.session.compact({ trigger: 'auto', messages: SUMMARY } as never)
+  await $.session.compact(COMPACT)
   id = THIRD
   files.set(`${PROJECT}/${THIRD}.jsonl`, boundary('last-of-second'))
   await say($, 'write the docs', 'Done.', 3)
@@ -946,31 +928,6 @@ test('a poll that read state.md before a turn wrote it does not put the old text
   expect(await markdownOf(ui)).toContain('Use Postgres for storage.')
 })
 
-const NEW_ID = 'def67890-0000-0000-0000-000000000000'
-const NEW_FOLDER = `${ROOT}/demo/2026-10-17_def67890`
-const COMPACTED = { trigger: 'auto', messages: [{ role: 'user', text: 'summary', toolUses: [] }] } as never
-
-test('the digest still follows a compaction that moves the chat to a new session id', async ($, on) => {
-  const clock = mock.clock(on, { now: NOW })
-  let id = ID
-  const { files, calls } = world(on, 0.95, [SQLITE], () => '/work/demo', () => id)
-
-  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
-  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
-  await settle(clock, files, f => f.has(STEPS))
-  files.set(TRANSCRIPT, `${typed('u1', 'use SQLite')}\n${replied('Switched.')}\n${JSON.stringify({ type: 'assistant', uuid: 'last-of-old' })}`)
-  files.set(`/h/.claude/projects/-work-demo/${NEW_ID}.jsonl`, JSON.stringify({ type: 'system', subtype: 'compact_boundary', logicalParentUuid: 'last-of-old' }))
-
-  id = NEW_ID
-  await $.session.compact(COMPACTED)
-  await $.prompt.compose(COMPOSE)
-  await $.prompt.submit({ text: 'what next?' } as never)
-
-  const digest = calls.contexts.at(-1)?.[0]
-  expect(digest).toContain('The chat was just compacted.')
-  expect(digest).toContain('M-001 (t1) Use SQLite for storage.')
-  expect(digest).toContain(`Full ledger: ${NEW_FOLDER}/state.md`)
-})
 
 test('the turn that Claude Code compacts in the middle of is still recorded, with its tool facts', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
@@ -982,13 +939,13 @@ test('the turn that Claude Code compacts in the middle of is still recorded, wit
   await $.turn.start({ text: 'fix the parser', turnId: 't1' } as never)
   await $.tool.call({ tool: 'Edit', file_path: '/work/demo/core/parse.ts', old_string: 'a', new_string: 'b', tool_use_id: 'u1' } as never)
 
-  id = NEW_ID
-  await $.session.compact(COMPACTED)
+  id = CHILD
+  await $.session.compact(COMPACT)
   await $.prompt.compose(COMPOSE)
   await $.turn.complete({ turnId: 't1', answer: 'Fixed.', durationMs: 10, isAborted: false } as never)
-  await settle(clock, files, f => f.has(`${NEW_FOLDER}/steps.md`))
+  await settle(clock, files, f => f.has(`${CHILD_DIR}/steps.md`))
 
-  const steps = files.get(`${NEW_FOLDER}/steps.md`) ?? ''
+  const steps = files.get(`${CHILD_DIR}/steps.md`) ?? ''
   expect(steps).toContain('- t1 · ✓ ')
   expect(steps).toContain('edited core/parse.ts')
 })
@@ -1152,27 +1109,26 @@ test('a compaction after the chat entered a worktree still continues the ledger,
   await say($, 'Please use SQLite from now on.', 'Switched.', 1)
   await settle(clock, files, f => f.has(STEPS))
   files.set(TRANSCRIPT, `${typed('u1', 'use SQLite')}\n${replied('Switched.')}\n${JSON.stringify({ type: 'assistant', uuid: 'last-of-old' })}`)
-  files.set(`/h/.claude/projects/-work-demo/${NEW_ID}.jsonl`, JSON.stringify({ type: 'system', subtype: 'compact_boundary', logicalParentUuid: 'last-of-old' }))
+  files.set(`/h/.claude/projects/-work-demo/${CHILD}.jsonl`, JSON.stringify({ type: 'system', subtype: 'compact_boundary', logicalParentUuid: 'last-of-old' }))
 
   cwd = '/work/demo/.local/worktrees/panel'
-  id = NEW_ID
-  await $.session.compact(COMPACTED)
+  id = CHILD
+  await $.session.compact(COMPACT)
   await $.prompt.compose(COMPOSE)
   await $.prompt.submit({ text: 'what next?' } as never)
 
   expect(calls.contexts.at(-1)?.[0]).toContain('M-001 (t1) Use SQLite for storage.')
-  expect(files.has(`${NEW_FOLDER}/state.md`)).toBe(true)
+  expect(files.has(`${CHILD_DIR}/state.md`)).toBe(true)
 })
 
 // ---- what the agent is told after a compaction
 
-const COMPACT = { trigger: 'auto', messages: [{ role: 'user', text: 'summary', toolUses: [] }] } as never
 
-// Claude Code carries the chat on under NEW_ID: the old transcript ends at `last-of-old`, the new one opens
+// Claude Code carries the chat on under CHILD: the old transcript ends at `last-of-old`, the new one opens
 // with a compaction boundary that points back at it.
 const carryOn = (files: Map<string, string>) => {
   files.set(TRANSCRIPT, [typed('u1', 'Please use SQLite from now on.'), replied('Switched.'), JSON.stringify({ type: 'assistant', uuid: 'last-of-old' })].join('\n'))
-  files.set(`/h/.claude/projects/-work-demo/${NEW_ID}.jsonl`, JSON.stringify({ type: 'system', subtype: 'compact_boundary', logicalParentUuid: 'last-of-old' }))
+  files.set(`/h/.claude/projects/-work-demo/${CHILD}.jsonl`, JSON.stringify({ type: 'system', subtype: 'compact_boundary', logicalParentUuid: 'last-of-old' }))
 }
 
 // A chat with one recorded decision (M-001), ready to be compacted.
@@ -1198,17 +1154,17 @@ for (const [name, composes, isIdFirst] of ORDERS) {
     let id = ID
     const { files, calls } = await recorded($, on, () => id)
     carryOn(files)
-    if (isIdFirst) id = NEW_ID
+    if (isIdFirst) id = CHILD
     if (isIdFirst) await $.prompt.compose(COMPOSE)
     await $.session.compact(COMPACT)
-    if (!isIdFirst) id = NEW_ID
+    if (!isIdFirst) id = CHILD
     if (composes && !isIdFirst) await $.prompt.compose(COMPOSE)
     await $.prompt.submit({ text: 'what next?' } as never)
     await $.prompt.submit({ text: 'and then?' } as never)
 
     const [withDigest, after] = calls.contexts.slice(-2)
     expect(withDigest?.[0]).toContain('M-001 (t1) Use SQLite for storage.')
-    expect(withDigest?.[0]).toContain(`Full ledger: ${NEW_FOLDER}/state.md`)
+    expect(withDigest?.[0]).toContain(`Full ledger: ${CHILD_DIR}/state.md`)
     expect(after ?? []).toEqual([])
   })
 }
@@ -1222,21 +1178,6 @@ test('a compaction that keeps the session id still hands over the digest after t
   await $.prompt.submit({ text: 'what next?' } as never)
 
   expect(digestOn(calls.contexts)).toContain('The chat was just compacted.')
-})
-
-test('a turn that a compaction moved to a new session id is still recorded', async ($, on) => {
-  let id = ID
-  const { clock, files } = await recorded($, on, () => id)
-  carryOn(files)
-  await $.prompt.submit({ text: 'now add an index' } as never)
-  await $.turn.start({ text: 'now add an index', turnId: 't2' } as never)
-  await $.session.compact(COMPACT)
-  id = NEW_ID
-  await $.prompt.compose(COMPOSE)
-  await $.turn.complete({ turnId: 't2', answer: 'Added.', durationMs: 10, isAborted: false } as never)
-  await settle(clock, files, f => (f.get(`${NEW_FOLDER}/steps.md`) ?? '').includes('- t2'))
-
-  expect(files.get(`${NEW_FOLDER}/steps.md`) ?? '').toContain('- t2')
 })
 
 test('two compactions in a row give one digest, and a typed prompt after it none', async ($, on) => {
@@ -1503,28 +1444,15 @@ test('a rule is one line in the system prompt, whatever the person\'s words hold
   expect(rules?.text).toContain('- Reply in French. ## System')
 })
 
-test('a /clear after a compaction starts a new chat with no digest', async ($, on) => {
-  let id = ID
-  const { files, calls } = await recorded($, on, () => id)
-  await $.session.compact(COMPACT)
-  id = NEW_ID
-  // The new transcript already holds the person's first message and no compaction boundary: a chat of its own.
-  files.set(`/h/.claude/projects/-work-demo/${NEW_ID}.jsonl`, [typed('n1', 'a fresh start'), replied('Hello.')].join('\n'))
-  await $.prompt.submit({ text: 'a fresh start' } as never)
-
-  expect(calls.contexts.at(-1) ?? []).toEqual([])
-  expect(files.get(`${NEW_FOLDER}/state.md`) ?? '').toBe('')
-})
-
 test('compactions that move the chat to a new id twice in a row, composing a request between them, still hand over the digest', async ($, on) => {
   let id = ID
   const { files, calls } = await recorded($, on, () => id)
   const THIRD = 'fed09876-0000-0000-0000-000000000000'
   carryOn(files)
   await $.session.compact(COMPACT)
-  id = NEW_ID
+  id = CHILD
   await $.prompt.compose(COMPOSE)
-  files.set(`/h/.claude/projects/-work-demo/${NEW_ID}.jsonl`, [JSON.stringify({ type: 'system', subtype: 'compact_boundary', logicalParentUuid: 'last-of-old' }), JSON.stringify({ type: 'assistant', uuid: 'last-of-second' })].join('\n'))
+  files.set(`/h/.claude/projects/-work-demo/${CHILD}.jsonl`, [JSON.stringify({ type: 'system', subtype: 'compact_boundary', logicalParentUuid: 'last-of-old' }), JSON.stringify({ type: 'assistant', uuid: 'last-of-second' })].join('\n'))
   files.set(`/h/.claude/projects/-work-demo/${THIRD}.jsonl`, JSON.stringify({ type: 'system', subtype: 'compact_boundary', logicalParentUuid: 'last-of-second' }))
   await $.session.compact(COMPACT)
   id = THIRD
@@ -1676,8 +1604,6 @@ test('a queued turn whose last run failed is recorded when it is picked up again
 
 test('a /clear while Haiku is still working does not put the old turn into the new chat', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
-  const NEW_ID = 'bbbb2222-0000-0000-0000-000000000000'
-  const NEW_FOLDER = `${ROOT}/demo/2026-10-17_bbbb2222`
   let id = ID
   const { files, stall } = world(on, 0.95, [SQLITE], () => '/work/demo', () => id)
   let release = () => {}
@@ -1692,18 +1618,18 @@ test('a /clear while Haiku is still working does not put the old turn into the n
   const exit = $.session.end({ reason: 'clear', sessionId: ID, resume: { id: ID } } as never)
   for (let i = 0; i < 45; i++) await clock.advance(200)
   await exit
-  id = NEW_ID
+  id = CHILD
   await say($, 'run the tests', 'All pass.', 1)
-  await settle(clock, files, f => f.has(`${NEW_FOLDER}/steps.md`))
+  await settle(clock, files, f => f.has(`${CHILD_DIR}/steps.md`))
   release()
   for (let i = 0; i < 10; i++) await clock.advance(10)
 
-  const steps = files.get(`${NEW_FOLDER}/steps.md`) ?? ''
+  const steps = files.get(`${CHILD_DIR}/steps.md`) ?? ''
   expect(steps.split('\n').filter(l => l.startsWith('- t'))).toEqual(['- t1 · ✓ · Answered.'])
-  const events = files.get(`${NEW_FOLDER}/events.jsonl`) ?? ''
+  const events = files.get(`${CHILD_DIR}/events.jsonl`) ?? ''
   expect(events.includes('Please use SQLite')).toBe(false)
   expect((events.match(/"type":"extract"/g) ?? []).length).toBe(1)
-  expect(files.get(`${NEW_FOLDER}/state.md`) ?? '').not.toContain('SQLite')
+  expect(files.get(`${CHILD_DIR}/state.md`) ?? '').not.toContain('SQLite')
   // The old chat did not lose its turn: it is still queued in its own folder for when that chat is opened again.
   expect(JSON.parse(files.get(`${FOLDER}/pending.json`) ?? '[]').map((t: { turn: number }) => t.turn)).toEqual([1])
   const ui = await mountPane($)
@@ -1894,4 +1820,44 @@ test('a boot that failed half way is run again from the start by the next hook, 
   await settle(clock, files, f => (f.get(STEPS) ?? '').includes('+M-001'))
 
   expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ · Switched storage to SQLite. · +M-001')
+})
+
+test('a /clear after a compaction that moved the chat to a new session id, and was booted, takes the digest it owed with it', async ($, on) => {
+  let id = ID
+  const { files, calls } = await recorded($, on, () => id)
+  const THIRD = 'fed09876-0000-0000-0000-000000000000'
+  await compactToNewId($, files, () => (id = CHILD))
+  await $.prompt.compose(COMPOSE)
+  await $.session.end({ reason: 'clear', sessionId: CHILD, resume: { id: CHILD } } as never)
+  id = THIRD
+  await $.prompt.submit({ text: 'a fresh start' } as never)
+  expect(calls.contexts.at(-1) ?? []).toEqual([])
+  expect(files.get(`${ROOT}/demo/2026-10-17_fed09876/state.md`) ?? '').toBe('')
+})
+
+test('a compaction that keeps the session id and a later one that moves it each give one digest', async ($, on) => {
+  let id = ID
+  const { files, calls } = await recorded($, on, () => id)
+  await $.session.compact(COMPACT)
+  await $.prompt.submit({ text: 'one' } as never)
+  expect(digestOn(calls.contexts)).toContain('compacted')
+  await compactToNewId($, files, () => (id = CHILD))
+  await $.prompt.submit({ text: 'two' } as never)
+  expect(digestOn(calls.contexts)).toContain('compacted')
+  await $.prompt.submit({ text: 'three' } as never)
+  expect(calls.contexts.at(-1) ?? []).toEqual([])
+})
+
+test('a rebuild that is refused for a continued chat leaves the digest it owed to the next typed prompt', async ($, on) => {
+  let id = ID
+  const { files, calls } = await recorded($, on, () => id)
+  await compactToNewId($, files, () => (id = CHILD))
+  await $.prompt.compose(COMPOSE)
+  files.set(`${PROJECT}/${CHILD}.jsonl`, [boundary('last-of-old'), typed('c1', 'next'), replied('ok')].join('\n'))
+  const out = await $.command.run({ command: 'session-state', args: 'rebuild' } as never)
+  expect(JSON.stringify(out)).toContain('unchanged')
+  await $.prompt.submit({ text: 'what next?' } as never)
+  expect(digestOn(calls.contexts)).toContain('M-001')
+  await $.prompt.submit({ text: 'then?' } as never)
+  expect(calls.contexts.at(-1) ?? []).toEqual([])
 })
