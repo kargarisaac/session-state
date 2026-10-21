@@ -95,6 +95,40 @@ test('redact hides keys and secret-looking assignments but not prose', async () 
   expect(out.includes('abcdefghijklmnop')).toBe(false)
 })
 
+test('redact also hides passwords in URLs, Basic auth, AWS and API secrets in settings, more token kinds and a cut-off private key', async () => {
+  const secrets: [string, string][] = [
+    ['postgres://admin:s3cretpw@db.example.com:5432/app', 's3cretpw'],
+    ['git clone https://x-access-token:abc123def@github.com/org/repo.git', 'abc123def'],
+    ['DATABASE_URL=postgres://admin:s3cretpw@db.example.com/app', 's3cretpw'],
+    ['Authorization: Basic dXNlcjpwYXNzd29yZA==', 'dXNlcjpwYXNzd29yZA'],
+    ['ASIAIOSFODNN7EXAMPLE', 'ASIAIOSFODNN7EXAMPLE'],
+    ['aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', 'wJalrXUtnFEMI'],
+    ['{"api_key": "abcdef1234567890xyz", "password": "hunter2hunter2"}', 'abcdef1234567890xyz'],
+    ['cd app && FOO_TOKEN=abc123 python run.py', 'abc123'],
+    ['hf_abcdefghijklmnopqrstuvwxyz0123456789', 'abcdefghijklmnopqrstuvwxyz'],
+    ['npm_abcdefghijklmnopqrstuvwxyz0123456789', 'abcdefghijklmnopqrstuvwxyz'],
+    ['sk_live_' + 'abcdefghijklmnopqrstuvwx', 'abcdefghijklmnopqrstuvwx'],
+    ['glpat-abcdefghijklmnopqrst', 'abcdefghijklmnopqrst'],
+    ['eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c', 'eyJzdWIiOiIx'],
+    ['-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\nabc', 'b3BlbnNzaC1rZXktdjEAAAAA'],
+  ]
+  for (const [text, secret] of secrets) expect([text, redact(text).includes(secret)]).toEqual([text, false])
+  const prose = [
+    'Key points: always use SQLite; token: string; the password field is hidden',
+    'see https://example.com/docs:443/x and ssh://git@github.com/org/repo, or git@github.com:org/repo.git',
+    'const apiKey = process.env.API_KEY',
+  ]
+  for (const text of prose) expect(redact(text)).toBe(text)
+})
+
+test('redact stays fast on a huge paste of blank lines or dotted words', async () => {
+  const start = Date.now()
+  redact(' \n'.repeat(40000))
+  redact('a.'.repeat(300000))
+  redact('A-'.repeat(300000))
+  expect(Date.now() - start).toBeLessThan(1000)
+})
+
 test('clip keeps the start and the end of a long text', async () => {
   const out = clip('A'.repeat(500) + 'B'.repeat(500), 100)
   expect(out.startsWith('AAAA')).toBe(true)
