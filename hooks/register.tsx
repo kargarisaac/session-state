@@ -8,7 +8,7 @@ import { archivedTurns, parseLedger, parsePending, serializeLedger, serializePen
 import { activeNotes, newFront, parseOldNotes, pointerText, rulesText, upsertIndex } from '../core/notes'
 import { processTurn } from '../core/pipeline'
 import { emptyState, HISTORY_HEAD, historyBlock, parseState, renderState, seedState } from '../core/state'
-import { appendStep, lastStep, stepLines } from '../core/steps'
+import { appendStep, hasStep, lastStep, stepLines } from '../core/steps'
 import { answersOf, continuesFrom, hasMessage, parseTranscript, withAnswers } from '../core/transcript'
 import type { Config, State, Turn } from '../core/types'
 import type { LedgerEvent, PendingTurn, Status, Tab } from '../types'
@@ -157,7 +157,7 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   }
   // What this process was recording until now. When that session compacted, this one is its continuation, and it
   // started in the same place, even if the person has since moved into a worktree.
-  const before = { dir: await read($, dir), origin: await read($, origin), isCompacted: await read($, isCompacted) }
+  const before = { dir: await read($, dir), origin: await read($, origin), isCompacted: await read($, isCompacted), id: await read($, sessionId) }
   const previous = before.isCompacted ? before.dir : ''
   const home = (await $.env.get('HOME')) ?? ''
   const cwd = previous !== '' && before.origin !== '' ? before.origin : await $.session.cwd()
@@ -216,8 +216,9 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   await update($, turns, () => Math.max(0, ...archive.map(r => r.turn), ...pending.map(t => t.turn), lastStep(stepsMd)))
   // A turn may be being written up right now; isBusy is the drain's to clear.
   await update($, status, s => ({ ...s, message: '' }))
-  // A chat that was compacted still owes the agent its digest, under the new id too.
-  await update($, isCompacted, () => isContinued)
+  // A chat that was compacted still owes the agent its digest: under the new id, and after a rebuild (which
+  // empties the session id, then boots the same chat again).
+  await update($, isCompacted, () => isContinued || (before.isCompacted && before.id === ''))
   return folder
 }
 
@@ -370,11 +371,15 @@ const syncPanel = async ($: EngineInterface): Promise<void> => {
   if (hasChanged(historyOf(folder), held.history, disk.history)) await update($, history, now => (now === held.history ? disk.history : now))
 }
 
+// Empty when the ledger has nothing to hand over.
 const digestOf = async ($: EngineInterface): Promise<string> => {
   const folder = await ensure($)
   const state = loadState(await read($, md), await frontOf($))
   const ledger = await read($, events)
-  return digestText(state, stepLines(await read($, steps)), ranked(state, ledger, await read($, turns)), folder)
+  const stepsMd = await read($, steps)
+  // The queue still holds the turns Haiku has not finished, so the ledger leaves them out.
+  const unrecorded = (await read($, queue)).filter(t => !hasStep(stepsMd, t.turn)).map(t => ({ turn: t.turn, user: t.user }))
+  return digestText(state, stepLines(stepsMd), ranked(state, ledger, await read($, turns)), folder, undefined, unrecorded)
 }
 
 export const register: Register = (on, options) => {
@@ -410,18 +415,25 @@ export const register: Register = (on, options) => {
     const kind = e.origin?.kind
     const isTyped = kind === undefined || kind === 'composer' || kind === 'bridge' || kind === 'sdk'
     if (!isTyped || e.command !== undefined || e.isMeta === true || e.text.trim() === '' || (await read($, isPaused))) return next(e)
+    let digest = ''
     try {
       await ensure($)
       await update($, pendingUser, p => (p === '' ? e.text : `${p}\n\n${e.text}`))
       if (await read($, isCompacted)) {
+        digest = await digestOf($)
         await update($, isCompacted, () => false)
-        const digest = await digestOf($)
-        return next({ ...e, context: [...(e.context ?? []), digest] })
       }
     } catch {
       // never block a prompt
     }
-    return next(e)
+    const out = await next(digest === '' ? e : { ...e, context: [...(e.context ?? []), digest] })
+    if (out.drop !== undefined) {
+      // Dropped beneath: the agent never saw it. It is not something the person asked, and the next typed
+      // prompt carries the digest.
+      await update($, pendingUser, p => (p === e.text ? '' : p.endsWith(`\n\n${e.text}`) ? p.slice(0, -(e.text.length + 2)) : p)).catch(quiet)
+      if (digest !== '') await update($, isCompacted, () => true).catch(quiet)
+    }
+    return out
   })
 
   on('turn.start', async ($, e, next) => {
@@ -538,7 +550,7 @@ export const register: Register = (on, options) => {
       return { text: `Rebuilding the ledger from the transcript: ${queued} turns queued. The old files are in before-rebuild/.` }
     }
     if (arg === 'path') return { text: await ensure($) }
-    if (arg === 'digest') return { text: await digestOf($) }
+    if (arg === 'digest') return { text: (await digestOf($)) || 'Nothing in the ledger yet, so a compaction would hand the agent nothing.' }
     const chosen = TABS.find(t => t === arg)
     if (chosen !== undefined) {
       await update($, tab, () => chosen)
