@@ -467,9 +467,20 @@ export const register: Register = (on, options) => {
     try {
       await ensure($)
       await update($, pendingUser, p => (p === '' ? e.text : `${p}\n\n${e.text}`))
-      if (await read($, isCompacted)) {
-        digest = await digestOf($)
-        await update($, isCompacted, () => false)
+      // Taken before the digest is built: a second prompt that lands while it is being built finds the flag
+      // down, so the agent is handed the digest once. If it cannot be built, the next prompt is owed it.
+      let isOwed = false
+      await update($, isCompacted, owed => {
+        isOwed = owed
+        return false
+      })
+      if (isOwed) {
+        try {
+          digest = await digestOf($)
+        } catch (error) {
+          await update($, isCompacted, () => true).catch(quiet)
+          throw error
+        }
       }
     } catch {
       // never block a prompt

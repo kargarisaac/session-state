@@ -2001,3 +2001,12 @@ for (let seed = 1; seed <= 24; seed++) {
     expect({ log: log.join(' '), shown }).toEqual({ log: log.join(' '), shown: everyTurn })
   })
 }
+
+test('two typed prompts at once after a compaction share one digest: the agent is handed it once', async ($, on) => {
+  const { calls } = await recorded($, on)
+  await $.session.compact(COMPACT)
+  const seen = calls.contexts.length
+  await Promise.all([$.prompt.submit({ text: 'first, from the keyboard' } as never), $.prompt.submit({ text: 'second, from a phone', origin: { kind: 'bridge' } } as never)])
+
+  expect(calls.contexts.slice(seen).flat().filter(Boolean)).toHaveLength(1)
+})
