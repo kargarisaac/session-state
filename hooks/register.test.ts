@@ -25,15 +25,28 @@ const PANE_PROPS = {
 
 const NOW = Date.UTC(2026, 9, 17, 8, 0, 0)
 
-// An engine whose files live in a map, whose Jev answers `p`, and whose Haiku answers from a script.
-const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = () => '/work/demo') => {
+// $.fs.read rejects a file over 4 MiB, as the engine does.
+const READ_CAP = 4 * 1024 * 1024
+
+// An engine whose files live in a map, whose Jev answers `p`, and whose Haiku answers from a script. The session
+// id and directory are read at each call, so a test can move the chat to a new id or into a worktree.
+const world = (
+  on: TestOn,
+  p: number,
+  replies: object[],
+  cwdOf: () => string = () => '/work/demo',
+  idOf: () => string = () => ID,
+  // How long each Haiku reply takes, on the test's clock.
+  hold: () => Promise<void> = async () => {},
+) => {
   const files = new Map<string, string>()
   const calls = { jev: 0, haiku: 0, efforts: [] as string[], contexts: [] as (readonly string[] | undefined)[] }
   mock.env(on, { HOME: '/h', OPENROUTER_API_KEY: 'test-key' })
-  on('session.id', () => ({ value: ID }) as never)
+  on('session.id', () => ({ value: idOf() }) as never)
   on('session.cwd', () => ({ value: cwdOf() }) as never)
   on('command.register', () => ({ value: {} }) as never)
   on('session.start', () => ({ cwd: '/work/demo' }) as never)
+  on('session.end', (_$, e) => ({ sessionId: e.sessionId }) as never)
   on('prompt.submit', (_$, e) => {
     calls.contexts.push(e.context)
     return { text: e.text } as never
@@ -50,11 +63,19 @@ const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = (
   on('prompt.compose', () => ({ sections: [] }) as never)
   on('ui.render', () => ({ type: 'Box', props: {}, children: [] }) as never)
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
-  on('fs.read', (_$, e) => (files.has(e.path) ? { value: files.get(e.path)! } : { deny: 'no such file' }) as never)
+  on('fs.read', (_$, e) => {
+    const text = files.get(e.path)
+    return (text !== undefined && text.length <= READ_CAP ? { value: text } : { deny: 'missing, or over 4 MiB' }) as never
+  })
+  // A write stamps the file with the next number, standing for its modification time.
+  const written = new Map<string, number>()
+  let tick = 0
   on('fs.write', (_$, e) => {
     files.set(e.path, e.text)
+    written.set(e.path, ++tick)
     return { value: undefined } as never
   })
+  on('fs.stat', (_$, e) => (files.has(e.path) ? { value: { kind: 'file', size: files.get(e.path)!.length, mtimeMs: written.get(e.path) ?? 0, isLink: false } } : { deny: 'ENOENT' }) as never)
   // The direct children of a folder: files, and folders that hold some file.
   on('fs.list', (_$, e) => {
     const base = `${(e as { path: string }).path}/`
@@ -72,12 +93,13 @@ const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = (
     const body = { model: 'typesafe/jev-1.14-x', answers: { important: { type: 'noul', noul: p } }, usage: { input_tokens: 356, output_tokens: 20, cost: 0.000015 } }
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } } as never
   })
-  on('model.complete', (_$, e) => {
+  on('model.complete', async (_$, e) => {
+    await hold()
     calls.efforts.push(String((e as { effort?: string }).effort))
     const next = replies[calls.haiku++] ?? { step: { text: 'Answered.', outcome: 'ok' }, memories: [] }
     return { value: { isAnswered: true, text: JSON.stringify(next), usage: USAGE } } as never
   })
-  return { files, calls }
+  return { files, calls, written }
 }
 
 const say = async ($: TestDollar, text: string, answer: string, n: number) => {
@@ -358,3 +380,25 @@ test('rebuild sets the current files aside and reads the whole chat back from th
   expect(lines).toEqual(['- t1 · ✓ · Chose SQLite.', '- t2 · ✓ · Ran the tests.'])
   expect(files.get(`${FOLDER}/before-rebuild/steps.md`) ?? '').toContain('Live turn seen late.')
 })
+
+const CHILD = 'new00002-0000-0000-0000-000000000000'
+const PROJECT = '/h/.claude/projects/-work-demo'
+const CHILD_DIR = `${ROOT}/demo/2026-10-17_new00002`
+const OLD_DIR = `${ROOT}/demo/2026-10-16_old00001`
+const SUMMARY = [{ role: 'user', text: 'summary', toolUses: [] }]
+const last = (uuid: string) => JSON.stringify({ type: 'assistant', uuid })
+const boundary = (uuid: string) => JSON.stringify({ type: 'system', subtype: 'compact_boundary', logicalParentUuid: uuid })
+const turnsOf = (steps: string | undefined) => (steps ?? '').split('\n').filter(l => l.startsWith('- t')).map(l => l.split(' · ')[0])
+
+// A ledger folder as the mod leaves it: the front matter points at the session's transcript.
+const ledgerOf = (id: string, note: string) =>
+  `---\nsession_id: ${id}\nproject: demo\ncwd: /work/demo\nstarted: 2026-10-16\ntranscript: ~/.claude/projects/-work-demo/${id}.jsonl\nresume: claude --resume ${id}\ntitle: Storage\nnext_id: 2\nnext_learning: 1\n---\n# Storage\n\n## Decisions and rules\n### M-001 · decision · t1\n${note}\nSource: t1 · turn u1\n`
+
+// The chat's old session has run turn 1 and ends in `last-of-old`; Claude Code compacts it and carries on under CHILD,
+// whose transcript opens with a compact boundary that points back at that message.
+const compactToNewId = async ($: TestDollar, files: Map<string, string>, moveTo: () => void, oldTranscript = last('last-of-old')) => {
+  files.set(`${PROJECT}/${ID}.jsonl`, oldTranscript)
+  await $.session.compact({ trigger: 'auto', messages: SUMMARY } as never)
+  moveTo()
+  files.set(`${PROJECT}/${CHILD}.jsonl`, boundary('last-of-old'))
+}
