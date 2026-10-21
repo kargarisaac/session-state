@@ -262,8 +262,13 @@ const handle = async ($: EngineInterface, config: Config, turn: PendingTurn): Pr
 
 // Runs outside any hook's budget, one turn at a time, so the next prompt is never held up.
 const drain = async ($: EngineInterface, config: Config): Promise<void> => {
-  if ((await read($, status)).isBusy) return
-  await update($, status, s => ({ ...s, isBusy: true }))
+  // The loop is claimed in one step on the busy flag itself: of two wake-ups at once, one gets it.
+  let isClaimed = false
+  await update($, status, s => {
+    isClaimed = !s.isBusy
+    return isClaimed ? { ...s, isBusy: true } : s
+  })
+  if (!isClaimed) return
   try {
     for (;;) {
       const next = (await read($, queue))[0]

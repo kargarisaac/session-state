@@ -716,3 +716,37 @@ test('pausing from the panel stops recording and says so; resuming records again
   await settle(clock, files, f => f.has(STEPS))
   expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ ')
 })
+
+test('two wake-ups of the queue at once run one loop, so no turn is recorded twice or skipped', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, holds } = world(on, 0.1, [])
+  // The first write of the busy flag waits, as one that takes longer than a neighbour's does.
+  let isArmed = false
+  let isHeld = false
+  let release = () => {}
+  on('state.set', { plugin: 'session-state', key: 'status' }, async (_$, e, next) => {
+    if (isArmed && !isHeld) {
+      isHeld = true
+      await new Promise<void>(resolve => (release = resolve))
+    }
+    return next(e)
+  })
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  let releaseHaiku = () => {}
+  holds.haiku = new Promise<void>(resolve => (releaseHaiku = resolve))
+  isArmed = true
+  await say($, 'run the tests', 'All pass.', 1)
+  await clock.settle()
+  expect(isHeld).toBe(true)
+  await say($, 'and the linter', 'Clean.', 2)
+  await clock.settle()
+  release()
+  await clock.settle()
+  releaseHaiku()
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t2'))
+
+  const lines = (files.get(STEPS) ?? '').split('\n').filter(l => l.startsWith('- t'))
+  expect(lines.map(l => l.split(' · ')[0])).toEqual(['- t1', '- t2'])
+  expect((files.get(EVENTS) ?? '').split('\n').filter(l => l.includes('"type":"extract"')).length).toBe(2)
+})
