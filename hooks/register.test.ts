@@ -425,3 +425,23 @@ test('a failing write of events.jsonl does not stop the state and the step line'
   expect(files.get(STATE) ?? '').toContain('### M-001 · decision · t1')
   expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ · Switched storage to SQLite. · +M-001')
 })
+
+test('a message typed while the previous turn is still being stored is not lost', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.1, [])
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await $.prompt.submit({ text: 'first message' } as never)
+  await $.turn.start({ text: 'first message', turnId: 't1' } as never)
+  await Promise.all([
+    $.turn.complete({ turnId: 't1', answer: 'Done.', durationMs: 10, isAborted: false } as never),
+    $.prompt.submit({ text: 'second message, sent as the first turn ended' } as never),
+  ])
+  await $.turn.start({ text: 'second message, sent as the first turn ended', turnId: 't2' } as never)
+  await $.turn.complete({ turnId: 't2', answer: 'Done again.', durationMs: 10, isAborted: false } as never)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t2'))
+
+  expect((files.get(STEPS) ?? '').split('\n').filter(l => l.startsWith('- t')).length).toBe(2)
+  expect(files.get(EVENTS) ?? '').toContain('"user":"second message, sent as the first turn ended"')
+  expect((files.get(EVENTS) ?? '').match(/"user":"first message"/g)?.length).toBe(1)
+})

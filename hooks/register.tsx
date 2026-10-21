@@ -375,7 +375,18 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
       try {
-        const user = await read($, pendingUser)
+        // Taken and cleared in one step each, before anything else is awaited: a message or a tool call that lands
+        // while this turn is being stored belongs to the next turn and must not be cleared with it.
+        let user = ''
+        let toolFacts = emptyFacts()
+        await update($, pendingUser, p => {
+          user = p
+          return ''
+        })
+        await update($, facts, f => {
+          toolFacts = f
+          return emptyFacts()
+        })
         if (user.trim() !== '' && !(await read($, isPaused))) {
           await ensure($)
           const n = (await read($, turns)) + 1
@@ -386,7 +397,7 @@ export const register: Register = (on, options) => {
             answer: e.answer,
             previousAnswer: await read($, previousAnswer),
             isAborted: e.isAborted,
-            facts: await read($, facts),
+            facts: toolFacts,
           }
           await update($, turns, () => n)
           await saveEvents($, [turnRecord(turn, await $.clock.now())]).catch(quiet)
@@ -395,8 +406,6 @@ export const register: Register = (on, options) => {
           kick($, options)
         }
         if (e.answer !== '') await update($, previousAnswer, () => e.answer)
-        await update($, pendingUser, () => '')
-        await update($, facts, () => emptyFacts())
       } catch {
         // never fail the turn's end
       }
