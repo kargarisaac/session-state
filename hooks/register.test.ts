@@ -26,11 +26,13 @@ const PANE_PROPS = {
 const NOW = Date.UTC(2026, 9, 17, 8, 0, 0)
 
 // An engine whose files live in a map, whose Jev answers `p`, and whose Haiku answers from a script.
-const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = () => '/work/demo') => {
+const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = () => '/work/demo', idOf: () => string = () => ID) => {
   const files = new Map<string, string>()
   const calls = { jev: 0, haiku: 0, efforts: [] as string[], contexts: [] as (readonly string[] | undefined)[] }
+  // A read of a path waits for its hold and then answers what the file held when it was asked; Haiku waits for its hold.
+  const holds = { reads: new Map<string, Promise<void>>(), haiku: undefined as Promise<void> | undefined }
   mock.env(on, { HOME: '/h', OPENROUTER_API_KEY: 'test-key' })
-  on('session.id', () => ({ value: ID }) as never)
+  on('session.id', () => ({ value: idOf() }) as never)
   on('session.cwd', () => ({ value: cwdOf() }) as never)
   on('command.register', () => ({ value: {} }) as never)
   on('session.start', () => ({ cwd: '/work/demo' }) as never)
@@ -50,7 +52,14 @@ const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = (
   on('prompt.compose', () => ({ sections: [] }) as never)
   on('ui.render', () => ({ type: 'Box', props: {}, children: [] }) as never)
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
-  on('fs.read', (_$, e) => (files.has(e.path) ? { value: files.get(e.path)! } : { deny: 'no such file' }) as never)
+  on('ui.close', () => ({ value: undefined }) as never)
+  on('fs.read', async (_$, e) => {
+    const text = files.get(e.path)
+    const hold = holds.reads.get(e.path)
+    holds.reads.delete(e.path)
+    await hold
+    return (text === undefined ? { deny: 'no such file' } : { value: text }) as never
+  })
   on('fs.write', (_$, e) => {
     files.set(e.path, e.text)
     return { value: undefined } as never
@@ -72,12 +81,13 @@ const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = (
     const body = { model: 'typesafe/jev-1.14-x', answers: { important: { type: 'noul', noul: p } }, usage: { input_tokens: 356, output_tokens: 20, cost: 0.000015 } }
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } } as never
   })
-  on('model.complete', (_$, e) => {
+  on('model.complete', async (_$, e) => {
     calls.efforts.push(String((e as { effort?: string }).effort))
+    await holds.haiku
     const next = replies[calls.haiku++] ?? { step: { text: 'Answered.', outcome: 'ok' }, memories: [] }
     return { value: { isAnswered: true, text: JSON.stringify(next), usage: USAGE } } as never
   })
-  return { files, calls }
+  return { files, calls, holds }
 }
 
 const say = async ($: TestDollar, text: string, answer: string, n: number) => {
@@ -357,4 +367,185 @@ test('rebuild sets the current files aside and reads the whole chat back from th
   const lines = (files.get(STEPS) ?? '').split('\n').filter(l => l.startsWith('- t'))
   expect(lines).toEqual(['- t1 · ✓ · Chose SQLite.', '- t2 · ✓ · Ran the tests.'])
   expect(files.get(`${FOLDER}/before-rebuild/steps.md`) ?? '').toContain('Live turn seen late.')
+})
+
+// What each tab shows, as the person reads it.
+const tabsOf = async ($: TestDollar, ui: Awaited<ReturnType<typeof mountPane>>) => {
+  const shown: Record<string, string> = {}
+  for (const name of ['steps', 'ledger', 'stats']) {
+    await $.command.run({ command: 'session-state', args: name } as never)
+    await ui.redraw()
+    shown[name] = `${await textOf(ui)}\n${JSON.stringify(await ui.findAll({ type: 'Markdown' } as never))}`
+  }
+  return shown
+}
+
+const SECOND = { step: { text: 'Ran the tests.', outcome: 'ok' }, memories: [] }
+
+test('closing the panel and opening it again shows the same ledger, with or without a turn in between', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.95, [SQLITE, SECOND])
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+
+  const first = await mountPane($)
+  const before = await tabsOf($, first)
+  expect(before.steps).toContain('Switched storage to SQLite.')
+  expect(before.ledger).toContain('Use SQLite for storage.')
+  await $.command.run({ command: 'session-state', args: 'close' } as never)
+  await first.unmount()
+
+  await $.command.run({ command: 'session-state', args: '' } as never)
+  const second = await mountPane($)
+  expect(await tabsOf($, second)).toEqual(before)
+  await $.command.run({ command: 'session-state', args: 'close' } as never)
+  await second.unmount()
+
+  await say($, 'run the tests', 'All pass.', 2)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t2'))
+  await $.command.run({ command: 'session-state', args: '' } as never)
+  const third = await mountPane($)
+  const after = await tabsOf($, third)
+  expect(after.steps).toContain('Switched storage to SQLite.')
+  expect(after.steps).toContain('Ran the tests.')
+  expect(after.ledger).toContain('Use SQLite for storage.')
+  expect(after.stats).toContain('1 decisions and rules')
+})
+
+const POSTGRES = {
+  step: { text: 'Moved storage to Postgres.', outcome: 'ok' },
+  memories: [{ kind: 'decision', text: 'Use Postgres for storage.', why: 'Needs concurrent writers.', context: '', quote: 'use Postgres', refers_to: [], supersedes: [1] }],
+}
+
+const markdownOf = async (ui: Awaited<ReturnType<typeof mountPane>>) => JSON.stringify(await ui.findAll({ type: 'Markdown' } as never))
+
+test('the history view follows the turns while the panel stays open', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.95, [SQLITE, POSTGRES])
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  await $.command.run({ command: 'session-state', args: 'ledger' } as never)
+  const ui = await mountPane($)
+  await ui.press({ key: 'history' })
+  expect(await markdownOf(ui)).toContain('Nothing replaced or finished yet.')
+
+  await say($, 'Actually use Postgres instead.', 'Moved.', 2)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t2'))
+
+  expect(files.get(`${FOLDER}/history.md`) ?? '').toContain('Use SQLite for storage.')
+  expect(await markdownOf(ui)).toContain('Use SQLite for storage.')
+})
+
+test('reopening the panel on the ledger tab shows the ledger, not the history it was left on', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.95, [SQLITE])
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  await $.command.run({ command: 'session-state', args: 'ledger' } as never)
+  const first = await mountPane($)
+  await first.press({ key: 'history' })
+  expect(await markdownOf(first)).toContain('Nothing replaced or finished yet.')
+  await $.command.run({ command: 'session-state', args: 'close' } as never)
+  await first.unmount()
+
+  await $.command.run({ command: 'session-state', args: 'ledger' } as never)
+  const second = await mountPane($)
+  expect(await markdownOf(second)).toContain('Use SQLite for storage.')
+})
+
+const DISK_STATE =
+  '---\nsession_id: x\nproject: demo\ncwd: /work/demo\nnext_id: 2\n---\n# Storage\n## Open asks\n_None._\n## Decisions and rules\n### M-001 · decision · t1\nUse SQLite for storage.\nWhy: No server to run.\nQuote: "use SQLite"\nSource: t1 · turn u1\n'
+const DISK_STEPS = '# Steps\n- t1 · ✓ · Chose SQLite. · +M-001\n'
+const DISK_EVENTS = `${JSON.stringify({ type: 'turn', at: 1, turn: 1, turnId: 'u1', user: 'use SQLite', answer: 'Done.', facts: {} })}\n`
+
+test('a panel drawn before the session has started shows the folder as soon as it is read', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.1, [])
+  files.set(STATE, DISK_STATE)
+  files.set(STEPS, DISK_STEPS)
+  files.set(EVENTS, DISK_EVENTS)
+
+  const ui = await mountPane($)
+  expect(await textOf(ui)).toContain('No steps yet')
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+
+  expect(await textOf(ui)).toContain('t1 · ✓ · Chose SQLite. · +M-001')
+  await $.command.run({ command: 'session-state', args: 'stats' } as never)
+  expect(await textOf(ui)).toContain('0 open asks · 1 decisions and rules')
+  await $.command.run({ command: 'session-state', args: 'ledger' } as never)
+  expect(await markdownOf(ui)).toContain('Use SQLite for storage.')
+})
+
+test('a state.md that cannot be read for a moment does not blank the panel; one that stays gone does', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.95, [SQLITE])
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  await $.command.run({ command: 'session-state', args: 'ledger' } as never)
+  const ui = await mountPane($)
+  expect(await markdownOf(ui)).toContain('Use SQLite for storage.')
+
+  const saved = files.get(STATE)!
+  files.delete(STATE)
+  await clock.advance(3000)
+  expect(await markdownOf(ui)).toContain('Use SQLite for storage.')
+  files.set(STATE, saved)
+  await clock.advance(3000)
+  expect(await markdownOf(ui)).toContain('Use SQLite for storage.')
+
+  files.delete(STATE)
+  await clock.advance(3000)
+  await clock.advance(3000)
+  expect(await markdownOf(ui)).toContain('No ledger yet.')
+})
+
+test('steps.md and history.md edited on disk show in the panel', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.95, [SQLITE])
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  const ui = await mountPane($)
+  expect(await textOf(ui)).toContain('Switched storage to SQLite.')
+
+  files.set(STEPS, '# Steps\n- t1 · ✓ · Rolled back by hand · +M-001\n')
+  await clock.advance(3000)
+  expect(await textOf(ui)).toContain('Rolled back by hand')
+
+  files.set(`${FOLDER}/history.md`, '# History\n### M-009 · decision · t1 · done at t2\nEdited by hand.\n')
+  await $.command.run({ command: 'session-state', args: 'ledger' } as never)
+  await ui.press({ key: 'history' })
+  await clock.advance(3000)
+  expect(await markdownOf(ui)).toContain('Edited by hand.')
+})
+
+test('a poll that read state.md before a turn wrote it does not put the old text back', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, holds } = world(on, 0.95, [SQLITE, POSTGRES])
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  await $.command.run({ command: 'session-state', args: 'ledger' } as never)
+  const ui = await mountPane($)
+
+  let release = () => {}
+  holds.reads.set(STATE, new Promise<void>(resolve => (release = resolve)))
+  await clock.advance(3000)
+  await say($, 'Actually use Postgres instead.', 'Moved.', 2)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t2'))
+  expect(await markdownOf(ui)).toContain('Use Postgres for storage.')
+  release()
+  await clock.settle()
+
+  expect(await markdownOf(ui)).toContain('Use Postgres for storage.')
 })

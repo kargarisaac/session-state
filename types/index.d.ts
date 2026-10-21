@@ -64,6 +64,7 @@ declare module 'claude-code' {
       origin: string
       md: string
       steps: string
+      history: string
       events: LedgerEvent[]
       queue: PendingTurn[]
       failed: PendingTurn[]
