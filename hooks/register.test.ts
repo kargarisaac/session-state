@@ -403,6 +403,44 @@ const compactToNewId = async ($: TestDollar, files: Map<string, string>, moveTo:
   files.set(`${PROJECT}/${CHILD}.jsonl`, boundary('last-of-old'))
 }
 
+test('a second child of the same parent copies the parent, not its sibling', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const { files, written } = world(on, 0.1, [])
+  files.set(`${OLD_DIR}/state.md`, ledgerOf('old00001-0000', 'Use SQLite for storage.'))
+  files.set(`${PROJECT}/old00001-0000.jsonl`, last('last-of-old'))
+  // The sibling was written after the parent, and its transcript names the same message, as its parent.
+  files.set(`${ROOT}/demo/2026-10-17_mid00002/state.md`, ledgerOf('mid00002-0000', 'Use Postgres for storage.'))
+  files.set(`${PROJECT}/mid00002-0000.jsonl`, `${boundary('last-of-old')}\n${last('mid-message')}`)
+  files.set(TRANSCRIPT, boundary('last-of-old'))
+  written.set(`${OLD_DIR}/state.md`, 1)
+  written.set(`${ROOT}/demo/2026-10-17_mid00002/state.md`, 2)
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+
+  const md = files.get(STATE) ?? ''
+  expect(md).toContain('Use SQLite for storage.')
+  expect(md.includes('Postgres')).toBe(false)
+})
+
+test('a parent that started long before the newest twelve folders is found by when its ledger was written', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const { files, written } = world(on, 0.1, [])
+  // Fifteen chats of the project started after the parent did, and were last written before its last turn.
+  for (let i = 1; i <= 15; i++) {
+    const path = `${ROOT}/demo/2026-10-${String(i).padStart(2, '0')}_chat${String(i).padStart(4, '0')}/state.md`
+    files.set(path, ledgerOf(`chat${String(i).padStart(4, '0')}-0000`, 'Another chat.'))
+    written.set(path, i)
+  }
+  files.set(`${ROOT}/demo/2026-09-01_old00001/state.md`, ledgerOf('old00001-0000', 'Use SQLite for storage.'))
+  written.set(`${ROOT}/demo/2026-09-01_old00001/state.md`, 100)
+  files.set(`${PROJECT}/old00001-0000.jsonl`, last('last-of-old'))
+  files.set(TRANSCRIPT, boundary('last-of-old'))
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+
+  expect(files.get(STATE) ?? '').toContain('Use SQLite for storage.')
+})
+
 // Haiku takes a while to write up a turn; the chat can move to a new session id while it does.
 for (const ms of [2000, 5000]) {
   test(`a turn still being written up when the chat moves to a new session id lands in the new ledger once (${ms} ms)`, async ($, on) => {

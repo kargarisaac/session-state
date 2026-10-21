@@ -9,7 +9,7 @@ import { activeNotes, newFront, parseOldNotes, pointerText, rulesText, upsertInd
 import { processTurn } from '../core/pipeline'
 import { emptyState, HISTORY_HEAD, historyBlock, parseState, renderState, seedState } from '../core/state'
 import { appendStep, stepLines } from '../core/steps'
-import { answersOf, continuesFrom, parseTranscript, withAnswers } from '../core/transcript'
+import { answersOf, continuesFrom, hasMessage, parseTranscript, withAnswers } from '../core/transcript'
 import type { Config, State, Turn } from '../core/types'
 import type { LedgerEvent, PendingTurn, Status, Tab } from '../types'
 import { gateLines, rows } from './format'
@@ -95,12 +95,25 @@ const loadState = (text: string, front: Record<string, string>): State => {
 const LEDGER_FILES = [stateOf, stepsOf, historyOf, eventsOf, pendingOf]
 const MAX_PARENTS = 12
 
-// The ledger folder of the chat this one continues, found by the last message the new transcript points back to.
+// The transcript a ledger folder names in its state.md; empty when it names none, or $.fs.read cannot read it
+// (it rejects a file over 4 MiB, as a long chat's is).
+const transcriptIn = async ($: EngineInterface, home: string, folder: string): Promise<string> => {
+  const path = /^transcript:\s*(.+)$/m.exec(await readText($, stateOf(folder)))?.[1]?.trim()
+  return path === undefined ? '' : readText($, path.replace(/^~/, home))
+}
+
+// The ledger folder of the chat this one continues, found by the last message the new transcript points back to,
+// among the folders whose ledgers were written last.
 const parentFolder = async ($: EngineInterface, here: string, folder: string, home: string, uuid: string): Promise<string | undefined> => {
-  const names = (await listOf($, here)).filter(e => e.kind === 'dir' && `${here}/${e.name}` !== folder).map(e => e.name).sort().reverse()
-  for (const name of names.slice(0, MAX_PARENTS)) {
-    const path = /^transcript:\s*(.+)$/m.exec(await readText($, stateOf(`${here}/${name}`)))?.[1]?.trim()
-    if (path !== undefined && (await readText($, path.replace(/^~/, home))).includes(uuid)) return `${here}/${name}`
+  const written: { path: string; at: number }[] = []
+  for (const entry of await listOf($, here)) {
+    const path = `${here}/${entry.name}`
+    if (entry.kind !== 'dir' || path === folder) continue
+    const stat = await $.fs.stat(stateOf(path)).catch(() => undefined)
+    if (stat !== undefined) written.push({ path, at: stat.mtimeMs })
+  }
+  for (const { path } of written.sort((a, b) => b.at - a.at).slice(0, MAX_PARENTS)) {
+    if (hasMessage(await transcriptIn($, home, path), uuid)) return path
   }
   return undefined
 }

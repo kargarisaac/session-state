@@ -74,6 +74,10 @@ export const continuesFrom = (text: string): string | undefined => {
   return undefined
 }
 
+// Whether a transcript holds the message itself, not only a record that points back at it (a boundary's
+// logicalParentUuid, or a child's parentUuid), so a sibling of the parent is not taken for the parent.
+export const hasMessage = (text: string, uuid: string): boolean => new RegExp(`"uuid"\\s*:\\s*"${uuid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`).test(text)
+
 export const parseTranscript = (text: string): Turn[] => {
   const turns: Turn[] = []
   const uses = new Map<string, ToolUse>()
