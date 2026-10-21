@@ -8,7 +8,7 @@ import { archivedTurns, parseLedger, parsePending, serializeLedger, serializePen
 import { activeNotes, newFront, parseOldNotes, pointerText, rulesText, upsertIndex } from '../core/notes'
 import { processTurn } from '../core/pipeline'
 import { emptyState, HISTORY_HEAD, historyBlock, parseState, renderState, seedState } from '../core/state'
-import { appendStep, stepLines } from '../core/steps'
+import { appendStep, hasStep, stepLines } from '../core/steps'
 import { answersOf, continuesFrom, parseTranscript, withAnswers } from '../core/transcript'
 import type { Config, State } from '../core/types'
 import type { LedgerEvent, PendingTurn, Status, Tab } from '../types'
@@ -299,11 +299,15 @@ const kick = ($: EngineInterface, options: PluginOptions): void =>
     await drain($, await configOf($, options)).catch(quiet)
   })
 
+// Empty when the ledger has nothing to hand over.
 const digestOf = async ($: EngineInterface): Promise<string> => {
   const folder = await ensure($)
   const state = loadState(await read($, md), await frontOf($))
   const ledger = await read($, events)
-  return digestText(state, stepLines(await read($, steps)), ranked(state, ledger, await read($, turns)), folder)
+  const stepsMd = await read($, steps)
+  // The queue still holds the turns Haiku has not finished, so the ledger leaves them out.
+  const unrecorded = (await read($, queue)).filter(t => !hasStep(stepsMd, t.turn)).map(t => ({ turn: t.turn, user: t.user }))
+  return digestText(state, stepLines(stepsMd), ranked(state, ledger, await read($, turns)), folder, undefined, unrecorded)
 }
 
 export const register: Register = (on, options) => {
@@ -468,7 +472,7 @@ export const register: Register = (on, options) => {
       return { text: queued === 0 ? 'No earlier turns in the transcript to rebuild from.' : `Rebuilding the ledger from the transcript: ${queued} turns queued. The old files are in before-rebuild/.` }
     }
     if (arg === 'path') return { text: await ensure($) }
-    if (arg === 'digest') return { text: await digestOf($) }
+    if (arg === 'digest') return { text: (await digestOf($)) || 'Nothing in the ledger yet, so a compaction would hand the agent nothing.' }
     const chosen = TABS.find(t => t === arg)
     if (chosen !== undefined) await update($, tab, () => chosen)
     await ensure($).catch(quiet)

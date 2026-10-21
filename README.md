@@ -101,7 +101,7 @@ Haiku sees the ledger, the last 15 steps, your last 10 messages word for word, t
 
 And your rules: the active `requirement` and `preference` notes (the newest 8). That part changes only when a rule is added or removed. Turn it off with `pinRules`.
 
-**After a compaction.** Claude Code's summary drops much of what a plugin added and reloads only a few files. When the mod sees the main chat compacted, it attaches a digest of the ledger (open asks, rules, learnings, files, recent steps; at most 8,000 characters) to your next message, once.
+**After a compaction.** Claude Code's summary drops much of what a plugin added and reloads only a few files. When the mod sees the main chat compacted, it attaches a digest of the ledger (open asks, rules, learnings, files, recent steps; at most 8,000 characters, each note cut short) to the next message you type, once. A message from a task, a schedule or another session does not use it up. Turns still being recorded are not in the ledger yet, so the digest lists your messages from them first. A ledger with nothing in it gives no digest.
 
 ## Settings
 
