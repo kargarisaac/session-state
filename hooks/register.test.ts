@@ -1846,3 +1846,29 @@ test('rebuild leaves a session that continues a compacted chat alone: its transc
   expect(files.get(STATE) ?? '').toContain('Use SQLite for storage.')
   expect(files.has(`${FOLDER}/before-rebuild/steps.md`)).toBe(false)
 })
+
+test('a second rebuild does not overwrite the files the first one set aside', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.1, [
+    { step: { text: 'Live turn seen late.', outcome: 'ok' }, memories: [] },
+    { step: { text: 'Chose SQLite.', outcome: 'ok' }, memories: [] },
+    { step: { text: 'Ran the tests.', outcome: 'ok' }, memories: [] },
+    { step: { text: 'Chose SQLite again.', outcome: 'ok' }, memories: [] },
+    { step: { text: 'Ran the tests again.', outcome: 'ok' }, memories: [] },
+  ])
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'run the tests', 'All pass.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  files.set(TRANSCRIPT, [typed('u1', 'pick a store'), replied('SQLite.'), typed('u2', 'run the tests'), replied('All pass.')].join('\n'))
+
+  await $.command.run({ command: 'session-state', args: 'rebuild' } as never)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t2'))
+  await clock.advance(1000)
+  const second = await $.command.run({ command: 'session-state', args: 'rebuild' } as never)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('again'))
+
+  expect(JSON.stringify(second)).toContain('2 turns queued')
+  expect(files.get(`${FOLDER}/before-rebuild/steps.md`) ?? '').toContain('Live turn seen late.')
+  expect(files.get(`${FOLDER}/before-rebuild-2/steps.md`) ?? '').toContain('Chose SQLite.')
+  expect(JSON.stringify(second)).toContain('before-rebuild-2/')
+})

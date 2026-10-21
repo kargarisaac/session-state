@@ -596,11 +596,15 @@ export const register: Register = (on, options) => {
       if (parent !== undefined && !hasMessage(transcript, parent)) {
         return { text: 'This chat continues one that was compacted, and its transcript starts after the compaction, so a rebuild would lose the earlier part of the ledger. The ledger is unchanged.' }
       }
-      // The current files move to before-rebuild/, then the next boot reads the chat back from its transcript.
+      // The current files move to before-rebuild/ (before-rebuild-2/ and on, when an earlier rebuild used it), then the
+      // next boot reads the chat back from its transcript.
+      const taken = new Set((await listOf($, folder)).map(entry => entry.name))
+      let aside = 'before-rebuild'
+      for (let n = 2; taken.has(aside); n++) aside = `before-rebuild-${n}`
       for (const path of [stateOf(folder), stepsOf(folder), historyOf(folder), eventsOf(folder), pendingOf(folder)]) {
         const text = await readText($, path)
         if (text === '') continue
-        await $.fs.write(`${folder}/before-rebuild/${baseOf(path)}`, text)
+        await $.fs.write(`${folder}/${aside}/${baseOf(path)}`, text)
         await $.fs.write(path, '')
       }
       booting = undefined
@@ -608,7 +612,7 @@ export const register: Register = (on, options) => {
       await ensure($)
       kick($, options)
       const queued = (await read($, queue)).length
-      return { text: `Rebuilding the ledger from the transcript: ${queued} turns queued. The old files are in before-rebuild/.` }
+      return { text: `Rebuilding the ledger from the transcript: ${queued} turns queued. The old files are in ${aside}/.` }
     }
     if (arg === 'path') return { text: await ensure($) }
     if (arg === 'digest') return { text: (await digestOf($)) || 'Nothing in the ledger yet, so a compaction would hand the agent nothing.' }

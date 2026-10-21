@@ -29,7 +29,7 @@ Work as usual. Then:
 - `/session-state` opens one side panel with three tab buttons at the top: **Steps** (one line per turn), **Ledger** (`state.md`, with a button for `history.md`) and **Stats** (models, counts, cost).
 - `/session-state steps | ledger | stats` opens the panel on that tab.
 - `/session-state close | pause | resume | retry | path | digest` closes the panel, stops recording, resumes, re-runs failed turns, prints the folder, or prints what the agent gets after a compaction.
-- `/session-state rebuild` moves the chat's ledger files to `before-rebuild/` and reads the whole chat again from Claude Code's transcript. It leaves the files alone when the transcript has no turns to read, or when the chat continues one that was compacted under a new session id (its transcript starts after the compaction, so the earlier turns are only in the ledger).
+- `/session-state rebuild` moves the chat's ledger files to `before-rebuild/` (`before-rebuild-2/` and on, for the next rebuilds) and reads the whole chat again from Claude Code's transcript. It leaves the files alone when the transcript has no turns to read, or when the chat continues one that was compacted under a new session id (its transcript starts after the compaction, so the earlier turns are only in the ledger).
 - Ask the agent "what did I decide about X?" and it reads the ledger.
 
 The panel reads `state.md`, `steps.md` and `history.md` again every few seconds, so a hand edit shows without reopening it. Closing the panel, or asking for a tab, takes the Ledger tab back to `state.md`.
