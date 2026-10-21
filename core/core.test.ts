@@ -6,7 +6,7 @@ import { checkFileRoles, checkLearnings, checkMemories, isQuoteOf, parseExtracti
 import { addToolCall, emptyFacts, factsText } from './facts'
 import { fileIndex, rankFiles } from './files'
 import { gateState, parseGate } from './gate'
-import { archivedTurns, haikuCost, parseLedger, parsePending, serializeLedger, serializePending, summarize, turnRecord } from './ledger'
+import { archivedTurns, fitLedger, haikuCost, parseLedger, parsePending, serializeLedger, serializePending, summarize, turnRecord } from './ledger'
 import { activeNotes, applyMemories, newFront, openAsks, parseOldNotes, rulesText, upsertIndex } from './notes'
 import { processTurn } from './pipeline'
 import type { Ledger } from './pipeline'
@@ -564,6 +564,29 @@ test('the ledger round-trips, keeps the turn archive, and its totals match the e
   expect(stats.haikuCost).toBe(haikuCost(USAGE))
   expect(parsePending(serializePending([t]))).toEqual([t])
   expect(parsePending('[{"turn":1,"turnId":"x","user":"u","answer":"a"}]')[0]!.facts).toEqual(emptyFacts())
+})
+
+test('a full ledger gives up the words of its oldest turns first, then its oldest events, and nothing recent', async () => {
+  const facts = (n: number) => withFacts({ read: [`/work/demo/f${n}.ts`] })
+  const events = Array.from({ length: 40 }, (_, i) => turnRecord(turn(`message ${i + 1} ${'u'.repeat(1000)}`, i + 1, { answer: 'a'.repeat(1000), facts: facts(i + 1) }), i))
+  const size = (list: readonly (typeof events)[number][]) => serializeLedger(list).length
+
+  expect(fitLedger(events, 1e9)).toEqual(events)
+
+  const squeezed = fitLedger(events, 70_000)
+  expect(size(squeezed)).toBeLessThanOrEqual(70_000)
+  expect(squeezed.length).toBe(40)
+  const [oldest, newest] = [squeezed[0]!, squeezed[39]!]
+  expect(oldest).toMatchObject({ type: 'turn', answer: '' })
+  expect(oldest.type === 'turn' && oldest.facts.read).toEqual(['/work/demo/f1.ts'])
+  expect(newest).toEqual(events[39])
+  expect(fitLedger(squeezed, 70_000)).toEqual(squeezed)
+
+  const tiny = fitLedger(events, 45_000)
+  expect(size(tiny)).toBeLessThanOrEqual(45_000)
+  expect(tiny.length).toBeLessThan(40)
+  expect(tiny.at(-1)).toEqual(events[39])
+  expect(tiny[0]).toMatchObject({ type: 'turn', turn: 40 - tiny.length + 1 })
 })
 
 test('the rules for the system prompt are only requirements and preferences, newest eight', async () => {

@@ -4,7 +4,7 @@ import type { EngineInterface, PluginOptions, Register } from 'claude-code'
 import { digestText } from '../core/digest'
 import { addToolCall, emptyFacts } from '../core/facts'
 import { fileIndex, rankFiles } from '../core/files'
-import { archivedTurns, parseLedger, parsePending, serializeLedger, serializePending, summarize, turnRecord } from '../core/ledger'
+import { archivedTurns, fitLedger, parseLedger, parsePending, serializeLedger, serializePending, summarize, turnRecord } from '../core/ledger'
 import { activeNotes, newFront, parseOldNotes, pointerText, rulesText, upsertIndex } from '../core/notes'
 import { processTurn } from '../core/pipeline'
 import { emptyState, HISTORY_HEAD, historyBlock, parseState, renderState, seedState } from '../core/state'
@@ -213,7 +213,7 @@ const savePending = async ($: EngineInterface): Promise<void> => {
 }
 
 const saveEvents = async ($: EngineInterface, add: LedgerEvent[]): Promise<LedgerEvent[]> => {
-  const all = [...(await read($, events)), ...add]
+  const all = fitLedger([...(await read($, events)), ...add])
   await update($, events, () => all)
   await $.fs.write(eventsOf(await read($, dir)), serializeLedger(all))
   return all
@@ -235,7 +235,8 @@ const handle = async ($: EngineInterface, config: Config, turn: PendingTurn): Pr
     turn,
   )
 
-  await saveEvents($, outcome.events)
+  // The state and the step line matter more than the archive: a failed write of it must not stop them.
+  await saveEvents($, outcome.events).catch(quiet)
   const out = renderState(outcome.state, ranked(outcome.state, ledger, turn.turn))
   await $.fs.write(stateOf(folder), out)
   await update($, md, () => out)

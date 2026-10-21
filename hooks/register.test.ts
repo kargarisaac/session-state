@@ -28,6 +28,8 @@ const NOW = Date.UTC(2026, 9, 17, 8, 0, 0)
 // An engine whose files live in a map, whose Jev answers `p`, and whose Haiku answers from a script.
 const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = () => '/work/demo') => {
   const files = new Map<string, string>()
+  // `refuse` names a path that every write fails for; the engine itself refuses any write over 4 MiB.
+  const refuse = { path: '' }
   const calls = { jev: 0, haiku: 0, efforts: [] as string[], contexts: [] as (readonly string[] | undefined)[] }
   mock.env(on, { HOME: '/h', OPENROUTER_API_KEY: 'test-key' })
   on('session.id', () => ({ value: ID }) as never)
@@ -52,6 +54,7 @@ const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = (
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
   on('fs.read', (_$, e) => (files.has(e.path) ? { value: files.get(e.path)! } : { deny: 'no such file' }) as never)
   on('fs.write', (_$, e) => {
+    if (e.text.length > 4 * 1024 * 1024 || e.path === refuse.path) throw new Error('write refused')
     files.set(e.path, e.text)
     return { value: undefined } as never
   })
@@ -79,7 +82,7 @@ const world = (on: TestOn, p: number, replies: object[], cwdOf: () => string = (
     if ('fail' in next) return { value: { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: USAGE } } as never
     return { value: { isAnswered: true, text: JSON.stringify(next), usage: USAGE } } as never
   })
-  return { files, calls }
+  return { files, calls, refuse }
 }
 
 const say = async ($: TestDollar, text: string, answer: string, n: number) => {
@@ -377,4 +380,48 @@ test('retry runs a failed turn again and rewrites its step line with what it fou
   expect(lines).toEqual(['- t1 · ✓ · Switched storage to SQLite. · +M-001'])
   expect(files.get(STATE) ?? '').toContain('### M-001 · decision · t1')
   expect(calls.haiku).toBe(3)
+})
+
+const archived = (turn: number, user: string, answer: string) =>
+  JSON.stringify({ type: 'turn', at: 1, turn, turnId: `old${turn}`, user, answer, facts: { read: [`/work/demo/f${turn}.ts`], edited: [], commands: 0, failures: [], commits: [] } })
+
+test('a long chat whose archive reaches 4 MiB still gets its state and steps written', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.1, [])
+  // An events.jsonl of about 1000 archived turns, a hair under the 4 MiB the engine lets a file or a state value hold.
+  const rows: string[] = []
+  let size = 0
+  while (size + archived(1, 'u'.repeat(1500), 'a'.repeat(2500)).length < 4_190_000) {
+    rows.push(archived(rows.length + 1, 'u'.repeat(1500), 'a'.repeat(2500)))
+    size += rows.at(-1)!.length + 1
+  }
+  rows.push(archived(rows.length + 1, 'u'.repeat(4_193_000 - size - archived(1, '', '').length - 1), ''))
+  files.set(EVENTS, `${rows.join('\n')}\n`)
+  expect((files.get(EVENTS) ?? '').length).toBeLessThan(4 * 1024 * 1024)
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'run the tests', 'All pass.', rows.length + 1)
+  await settle(clock, files, f => f.has(STEPS))
+
+  expect(files.get(STEPS) ?? '').toContain(`- t${rows.length + 1} · ✓ · Answered.`)
+  const events = files.get(EVENTS) ?? ''
+  expect(events.length).toBeLessThan(3_100_000)
+  expect(events).toContain('"user":"run the tests"')
+  // The oldest turn keeps its tool facts but not its words.
+  const first = events.split('\n').find(line => line.includes('"turn":1,')) ?? ''
+  expect(first).toContain('/work/demo/f1.ts')
+  expect(first.length).toBeLessThan(900)
+})
+
+test('a failing write of events.jsonl does not stop the state and the step line', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, refuse } = world(on, 0.95, [SQLITE])
+  refuse.path = EVENTS
+
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+
+  expect(files.get(STATE) ?? '').toContain('### M-001 · decision · t1')
+  expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ · Switched storage to SQLite. · +M-001')
 })
