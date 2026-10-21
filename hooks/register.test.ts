@@ -750,3 +750,25 @@ test('two wake-ups of the queue at once run one loop, so no turn is recorded twi
   expect(lines.map(l => l.split(' · ')[0])).toEqual(['- t1', '- t2'])
   expect((files.get(EVENTS) ?? '').split('\n').filter(l => l.includes('"type":"extract"')).length).toBe(2)
 })
+
+test('a compaction after the chat entered a worktree still continues the ledger, in the project the chat started in', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  let id = ID
+  let cwd = '/work/demo'
+  const { files, calls } = world(on, 0.95, [SQLITE], () => cwd, () => id)
+
+  await $.session.start({ cwd, surface: 'terminal' } as never)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  files.set(TRANSCRIPT, `${typed('u1', 'use SQLite')}\n${replied('Switched.')}\n${JSON.stringify({ type: 'assistant', uuid: 'last-of-old' })}`)
+  files.set(`/h/.claude/projects/-work-demo/${NEW_ID}.jsonl`, JSON.stringify({ type: 'system', subtype: 'compact_boundary', logicalParentUuid: 'last-of-old' }))
+
+  cwd = '/work/demo/.local/worktrees/panel'
+  id = NEW_ID
+  await $.session.compact(COMPACTED)
+  await $.prompt.compose(COMPOSE)
+  await $.prompt.submit({ text: 'what next?' } as never)
+
+  expect(calls.contexts.at(-1)?.[0]).toContain('M-001 (t1) Use SQLite for storage.')
+  expect(files.has(`${NEW_FOLDER}/state.md`)).toBe(true)
+})

@@ -128,7 +128,9 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
     if (known !== '') return known
   }
   const home = (await $.env.get('HOME')) ?? ''
-  const cwd = await $.session.cwd()
+  // The directory moves when the person enters a worktree, but the chat's project, folder and transcript stay
+  // where it started, also for the next session id of the same process (a compaction, a /clear).
+  const cwd = (await read($, origin)) || (await $.session.cwd())
   const root = `${home}/.claude/session-state`
   const here = `${root}/${projectOf(cwd)}`
   const id8 = `_${id.slice(0, 8)}`
