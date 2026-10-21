@@ -1861,3 +1861,143 @@ test('a rebuild that is refused for a continued chat leaves the digest it owed t
   await $.prompt.submit({ text: 'then?' } as never)
   expect(calls.contexts.at(-1) ?? []).toEqual([])
 })
+
+// ---- random runs of the whole lifecycle
+
+// A small seeded generator, so a failing run can be replayed from its seed.
+const random = (seed: number) => () => {
+  seed = (seed * 1664525 + 1013904223) % 4294967296
+  return seed / 4294967296
+}
+const idOf = (n: number) => `${String(n).padStart(8, '0')}-0000-0000-0000-000000000000`
+
+// Turns, compactions that keep the id or move it (with a slow disk, or in the middle of a turn), /clear, a Haiku that
+// fails, retry and pause, in a random order. Whatever the order, the folder the chat ends in holds each turn since the
+// last /clear once and in order, nothing is left queued, the open panel shows the same steps, and the agent is handed
+// the digest once after each compaction and never otherwise.
+for (let seed = 1; seed <= 24; seed++) {
+  test(`a random run of turns, compactions and clears records every turn once and hands over the digest once (seed ${seed})`, async ($, on) => {
+    const next = random(seed)
+    const clock = mock.clock(on, { now: NOW })
+    let n = 1
+    let id = idOf(n)
+    let latency = 0
+    const { files, calls, holds } = world(on, 0.1, [], () => '/work/demo', () => id, () => clock.sleep(latency))
+    const folderOf = (of: string) => `${ROOT}/demo/2026-10-17_${of.slice(0, 8)}`
+    const log: string[] = []
+    // Turns since the last /clear, turns since the id last moved, whether the agent is owed a digest.
+    let recorded = 0
+    let sinceMove = 0
+    let isOwed = false
+    let lastOfOld = ''
+    const stepsNow = () => turnsOf(files.get(`${folderOf(id)}/steps.md`))
+    const isQueueEmpty = () => (files.get(`${folderOf(id)}/pending.json`) ?? '[]') === '[]'
+    const pick = <T,>(list: readonly T[]): T => list[Math.floor(next() * list.length)]!
+    // What the agent was handed with a prompt: one digest when it is owed one and the ledger has a turn, else nothing.
+    const checkDigest = (contexts: (readonly string[] | undefined)[]) => {
+      const given = contexts.flat().filter(Boolean).length
+      expect({ log: log.join(' '), given }).toEqual({ log: log.join(' '), given: isOwed && recorded > 1 ? 1 : 0 })
+      isOwed = false
+    }
+    const typeTurn = async () => {
+      latency = pick([0, 300, 2000])
+      if (next() < 0.15) holds.fails = 2
+      recorded += 1
+      sinceMove += 1
+      log.push(`turn${recorded}${holds.fails > 0 ? '(haiku fails)' : ''}@${latency}`)
+      const seen = calls.contexts.length
+      await say($, `do thing ${recorded}`, 'Done.', recorded)
+      checkDigest(calls.contexts.slice(seen))
+    }
+    // Claude Code compacts and carries on under a new session id; a read of the new folder or the old one can be slow.
+    const moveToNewId = async (isSlow: boolean) => {
+      const last = `last-of-${n}`
+      files.set(`${PROJECT}/${id}.jsonl`, `${lastOfOld === '' ? '' : `${boundary(lastOfOld)}\n`}${typed(`u${n}`, 'x')}\n${replied('y')}\n${JSON.stringify({ type: 'assistant', uuid: last })}`)
+      await $.session.compact(COMPACT)
+      const old = id
+      n += 1
+      id = idOf(n)
+      files.set(`${PROJECT}/${id}.jsonl`, boundary(last))
+      lastOfOld = last
+      isOwed = true
+      sinceMove = 0
+      if (!isSlow) {
+        if (next() < 0.5) await $.prompt.compose(COMPOSE)
+        return
+      }
+      const slow = pick([`${folderOf(id)}/events.jsonl`, `${folderOf(id)}/pending.json`, `${folderOf(old)}/state.md`, `${folderOf(old)}/events.jsonl`, `${folderOf(old)}/steps.md`])
+      let release = () => {}
+      holds.reads.set(slow, new Promise<void>(resolve => (release = resolve)))
+      const composing = $.prompt.compose(COMPOSE)
+      await clock.advance(pick([100, 1500, 2500, 6000]))
+      release()
+      await composing
+      log.push(`(slow ${slow.split('/').slice(-2).join('/')})`)
+    }
+
+    await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+    await $.command.run({ command: 'session-state', args: 'steps' } as never)
+    const ui = await mountPane($)
+    for (let step = 0; step < 14; step++) {
+      const r = next()
+      if (r < 0.4 || sinceMove === 0) await typeTurn()
+      else if (r < 0.5) {
+        log.push('compactSame')
+        await $.session.compact(COMPACT)
+        isOwed = true
+      } else if (r < 0.62) {
+        log.push('compactNew')
+        await moveToNewId(next() < 0.6)
+      } else if (r < 0.72) {
+        // The compaction comes in the middle of a turn, which then ends under the new id.
+        latency = pick([0, 300, 2000])
+        recorded += 1
+        log.push(`midturn${recorded}@${latency}`)
+        const seen = calls.contexts.length
+        await $.prompt.submit({ text: `do thing ${recorded}` } as never)
+        await $.turn.start({ text: `do thing ${recorded}`, turnId: `t${recorded}` } as never)
+        checkDigest(calls.contexts.slice(seen))
+        await moveToNewId(false)
+        await $.prompt.compose(COMPOSE)
+        await $.turn.complete({ turnId: `t${recorded}`, answer: 'Done.', durationMs: 10, isAborted: false } as never)
+        sinceMove = 1
+      } else if (r < 0.8) {
+        log.push('clear')
+        const exit = $.session.end({ reason: 'clear', sessionId: id, resume: { id } } as never)
+        let isOver = false
+        void exit.then(() => (isOver = true))
+        for (let i = 0; i < 200 && !isOver; i++) await clock.advance(1000)
+        await exit
+        n += 1
+        id = idOf(n)
+        recorded = 0
+        lastOfOld = ''
+        isOwed = false
+        sinceMove = 0
+      } else if (r < 0.89) {
+        log.push('pausedTurn')
+        await $.command.run({ command: 'session-state', args: 'pause' } as never)
+        await say($, 'not recorded', 'x', 0)
+        await $.command.run({ command: 'session-state', args: 'resume' } as never)
+      } else if (r < 0.94) {
+        log.push('retry')
+        await $.command.run({ command: 'session-state', args: 'retry' } as never)
+      } else {
+        log.push('wait')
+        await clock.advance(1000)
+      }
+    }
+    latency = 0
+    holds.fails = 0
+    await $.prompt.compose(COMPOSE)
+    for (let i = 0; i < 80 && (stepsNow().length < recorded || !isQueueEmpty()); i++) await clock.advance(1000)
+
+    const everyTurn = Array.from({ length: recorded }, (_, i) => `- t${i + 1}`)
+    expect({ log: log.join(' '), steps: stepsNow(), isQueueEmpty: isQueueEmpty() }).toEqual({ log: log.join(' '), steps: everyTurn, isQueueEmpty: true })
+    await clock.advance(3000)
+    await $.command.run({ command: 'session-state', args: 'steps' } as never)
+    await ui.redraw()
+    const shown = (await textOf(ui)).split('\n').filter(line => /^t\d+ · /.test(line)).map(line => `- ${line.split(' · ')[0]}`)
+    expect({ log: log.join(' '), shown }).toEqual({ log: log.join(' '), shown: everyTurn })
+  })
+}
