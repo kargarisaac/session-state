@@ -246,6 +246,34 @@ test('after Claude Code compacts, the next typed prompt carries the ledger diges
   expect(withDigest?.[0]).toContain('M-001 (t1) Use SQLite for storage.')
   expect(withDigest?.[0]).toContain(`Full ledger: ${FOLDER}/state.md`)
   expect(after ?? []).toEqual([])
+  const logged = (files.get(EVENTS) ?? '').trim().split('\n').map(line => JSON.parse(line))
+  expect(logged.filter(e => e.type === 'compaction')).toEqual([{ type: 'compaction', at: NOW + 10, turn: 1 }])
+  expect(logged.filter(e => e.type === 'digest')).toEqual([{ type: 'digest', at: NOW + 10, turn: 2, length: withDigest?.[0]?.length }])
+  await $.command.run({ command: 'session-state', args: 'stats' } as never)
+  const ui = await mountPane($)
+  expect(await textOf(ui)).toContain('1 compaction · 1 digest delivered · 0 ledger reads')
+})
+
+test('ledger reads by the main agent are logged with the turn and subagent reads are not', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.95, [])
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await $.prompt.submit({ text: 'check the ledger' } as never)
+  await $.tool.call({ tool: 'Read', file_path: STATE, tool_use_id: 'r1' } as never)
+  await $.tool.call({ tool: 'Read', file_path: STATE, tool_use_id: 'r2', agentId: 'sub1' } as never)
+  await $.tool.call({ tool: 'Read', file_path: `${FOLDER}/pending.json`, tool_use_id: 'r3' } as never)
+  await $.tool.call({ tool: 'Grep', path: `${FOLDER}/history.md`, pattern: 'SQLite', tool_use_id: 'r4' } as never)
+  await $.tool.call({ tool: 'Bash', command: `rg SQLite ${FOLDER}`, tool_use_id: 'r5' } as never)
+  await $.tool.call({ tool: 'Grep', path: `${FOLDER}-other/state.md`, pattern: 'SQLite', tool_use_id: 'r6' } as never)
+  const logged = (files.get(EVENTS) ?? '').trim().split('\n').map(line => JSON.parse(line))
+  expect(logged.filter(e => e.type === 'read')).toEqual([
+    { type: 'read', at: NOW, turn: 1, tool: 'Read', file: 'state.md' },
+    { type: 'read', at: NOW, turn: 1, tool: 'Grep', file: 'history.md' },
+    { type: 'read', at: NOW, turn: 1, tool: 'Bash', file: '2026-10-17_abc12345' },
+  ])
+  await $.command.run({ command: 'session-state', args: 'stats' } as never)
+  const ui = await mountPane($)
+  expect(await textOf(ui)).toContain('0 compactions · 0 digests delivered · 3 ledger reads')
 })
 
 test('a paused session records nothing', async ($, on) => {
@@ -1203,12 +1231,13 @@ test('two compactions in a row give one digest, and a typed prompt after it none
 })
 
 test('a subagent\'s compaction and a precompute do not arm the digest', async ($, on) => {
-  const { calls } = await recorded($, on)
+  const { calls, files } = await recorded($, on)
   await $.session.compact({ ...(COMPACT as object), agentId: 'sub1' } as never)
   await $.session.compact({ ...(COMPACT as object), trigger: 'precompute' } as never)
   await $.prompt.submit({ text: 'what next?' } as never)
 
   expect(calls.contexts.at(-1) ?? []).toEqual([])
+  expect((files.get(EVENTS) ?? '').includes('"type":"compaction"')).toBe(false)
 })
 
 test('a prompt the person did not type leaves the digest for the next one they type', async ($, on) => {
@@ -1266,7 +1295,7 @@ test('the reminders the app wraps around a typed message are not part of what th
 })
 
 test('a typed prompt that something beneath drops does not use up the digest', async ($, on) => {
-  const { calls } = await recorded($, on)
+  const { calls, files } = await recorded($, on)
   await $.session.compact(COMPACT)
   calls.isDropping = true
   const dropped = await $.prompt.submit({ text: 'what next?' } as never)
@@ -1275,6 +1304,7 @@ test('a typed prompt that something beneath drops does not use up the digest', a
 
   expect(dropped.drop).toBe('blocked')
   expect(digestOn(calls.contexts)).toContain('The chat was just compacted.')
+  expect((files.get(EVENTS) ?? '').split('"type":"digest"').length - 1).toBe(1)
 })
 
 test('a typed prompt that something beneath drops is not recorded as something the person asked', async ($, on) => {

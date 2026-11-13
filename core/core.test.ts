@@ -607,6 +607,12 @@ test('the ledger round-trips, keeps the turn archive, and its totals match the e
   const stats = summarize(events)
   expect(stats).toMatchObject({ turns: 1, passed: 1, saved: 1, jevCalls: 1, extractions: 1, summaries: 0 })
   expect(stats.haikuCost).toBe(haikuCost(USAGE))
+  const activity = parseLedger(serializeLedger([
+    { type: 'compaction', at: 10, turn: 2 },
+    { type: 'digest', at: 11, turn: 3, length: 100 },
+    { type: 'read', at: 12, turn: 3, tool: 'Read', file: 'state.md' },
+  ]))
+  expect(summarize(activity)).toMatchObject({ compactions: 1, digests: 1, reads: 1 })
   expect(parsePending(serializePending([t]))).toEqual([t])
   expect(parsePending('[{"turn":1,"turnId":"x","user":"u","answer":"a"}]')[0]!.facts).toEqual(emptyFacts())
 })

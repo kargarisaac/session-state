@@ -32,6 +32,9 @@ export type Stats = {
   closed: number
   dropped: number
   lookups: number
+  compactions: number
+  digests: number
+  reads: number
   jevCost: number
   jevMs: number
   jevCalls: number
@@ -45,11 +48,14 @@ export type Stats = {
 export const summarize = (events: readonly LedgerEvent[]): Stats => {
   const stats: Stats = {
     turns: 0, passed: 0, skipped: 0, gateErrors: 0, summaries: 0, extractions: 0, haikuErrors: 0, saved: 0, learned: 0,
-    closed: 0, dropped: 0, lookups: 0, jevCost: 0, jevMs: 0, jevCalls: 0, haikuUsage: emptyUsage(), haikuCost: 0, haikuMs: 0,
+    closed: 0, dropped: 0, lookups: 0, compactions: 0, digests: 0, reads: 0, jevCost: 0, jevMs: 0, jevCalls: 0, haikuUsage: emptyUsage(), haikuCost: 0, haikuMs: 0,
     lastGates: [],
   }
   for (const e of events) {
     if (e.type === 'turn') continue
+    if (e.type === 'compaction') { stats.compactions += 1; continue }
+    if (e.type === 'digest') { stats.digests += 1; continue }
+    if (e.type === 'read') { stats.reads += 1; continue }
     if (e.type === 'gate') {
       stats.turns += 1
       if (e.action === 'skip') stats.skipped += 1
@@ -94,7 +100,7 @@ export const parseLedger = (text: string): LedgerEvent[] =>
     .flatMap((line): LedgerEvent[] => {
       try {
         const e = JSON.parse(line) as LedgerEvent
-        if (e.type === 'gate' || e.type === 'extract') return [e]
+        if (e.type === 'gate' || e.type === 'extract' || e.type === 'compaction' || e.type === 'digest' || e.type === 'read') return [e]
         if (e.type === 'turn') return [{ ...e, facts: isFacts(e.facts) ? { ...emptyFacts(), ...e.facts } : emptyFacts() }]
         return []
       } catch {
