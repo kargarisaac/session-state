@@ -170,7 +170,7 @@ await pool(FILES, FILES.length, async file => {
   const probes = (Array.isArray(parsed) ? parsed : parsed.probes).filter(p => (TYPES as readonly string[]).includes(p.type))
   writeFileSync(join(out, 'probes.json'), JSON.stringify(probes, null, 2))
   writeFileSync(join(out, 'summary.md'), summary)
-  sizes.push({ session: id, turns: session.turns.length, summary: summary.length, ledger: md.length + steps.length, notes: (md.match(/^### [ML]-/gm) ?? []).length, calls: totals.calls, input: totals.usage.input + totals.usage.cacheRead + totals.usage.cacheWrite, output: totals.usage.output, seconds: totals.ms / 1000 })
+  sizes.push({ session: id, turns: session.turns.length, summary: summary.length, ledger: md.length + steps.length, notes: (md.match(/^(?:### |- )[ML]-\d/gm) ?? []).length, calls: totals.calls, input: totals.usage.input + totals.usage.cacheRead + totals.usage.cacheWrite, output: totals.usage.output, seconds: totals.ms / 1000 })
   console.log(`  ${probes.length} probes; answering under ${CONDITIONS.length} conditions`)
 
   const jobs = probes.flatMap(p => CONDITIONS.map(c => ({ p, c })))
