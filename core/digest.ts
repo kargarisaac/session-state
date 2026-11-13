@@ -43,7 +43,7 @@ export const digestText = (
   const cwd = state.front.cwd ?? ''
   const active = activeNotes(state)
   const note = (n: (typeof active)[number]) =>
-    `- ${noteLabel(n.id)} (t${n.turn}) ${short(n.text, TEXT_CHARS)}${n.why === '' ? '' : ` Why: ${short(n.why, WHY_CHARS)}`}${n.quote === '' ? '' : ` User: "${short(n.quote, QUOTE_CHARS)}"`}`
+    `- ${noteLabel(n.id)} (t${n.turn}) ${short(n.text, TEXT_CHARS)}${n.why === '' ? '' : ` Why: ${short(n.why, WHY_CHARS)}`}${n.quote === '' ? '' : ` ${n.via === undefined ? 'User' : `Via ${n.via}`}: "${short(n.quote, QUOTE_CHARS)}"`}`
   const blocks: [string, string[]][] = [
     [
       'Not in the ledger yet (these turns are still being recorded, so the sections below leave them out)',

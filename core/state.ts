@@ -34,7 +34,7 @@ const parseFront = (md: string): { front: Record<string, string>; body: string }
 
 type Block = { head: RegExpExecArray; isNote: boolean; text: string[]; fields: Record<string, string> }
 
-const FIELD = /^(Why|Context|Quote|Source|Evidence): ?(.*)$/
+const FIELD = /^(Why|Context|Quote|Via|Source|Evidence): ?(.*)$/
 
 const unquote = (s: string): string => (s.length >= 2 && s.startsWith('"') && s.endsWith('"') ? s.slice(1, -1) : s)
 
@@ -57,6 +57,7 @@ const finish = (b: Block, state: State): void => {
       quote: unquote(b.fields.Quote ?? ''),
       source: sourceOf(b.fields.Source ?? ''),
       status: 'active',
+      ...(b.fields.Via === undefined || b.fields.Via === '' ? {} : { via: b.fields.Via }),
     })
   } else {
     if (!(LEARN_KINDS as readonly string[]).includes(b.head[2]!)) return
@@ -137,6 +138,7 @@ export const noteBlock = (n: Note, tail = ''): string =>
     ...(n.why === '' ? [] : [`Why: ${oneLine(n.why)}`]),
     ...(n.context === '' ? [] : [`Context: ${oneLine(n.context)}`]),
     ...(n.quote === '' ? [] : [`Quote: "${oneLine(n.quote)}"`]),
+    ...(n.via === undefined ? [] : [`Via: ${oneLine(n.via)}`]),
     `Source: ${sourceLine(n)}`,
   ].join('\n')
 

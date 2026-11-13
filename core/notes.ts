@@ -47,6 +47,7 @@ export const applyMemories = (
   turnId: string,
   title: string,
   done: number[] = [],
+  via?: string,
 ): { state: State; moved: Moved[] } => {
   let next = Math.max(Number(state.front.next_id) || 1, state.notes.reduce((top, n) => Math.max(top, n.id + 1), 1))
   let notes = [...state.notes]
@@ -65,6 +66,7 @@ export const applyMemories = (
       quote: m.quote,
       source: { turnId, refersTo: m.refersTo },
       status: 'active',
+      ...(via === undefined ? {} : { via }),
     })
   }
   for (const old of notes.filter(n => done.includes(n.id) && n.kind === 'ask')) moved.push({ item: old, reason: 'done', turn })
@@ -88,7 +90,8 @@ const MAX_RULES = 8
 
 // The few rules that must hold all chat long, for the system prompt. Empty when the person has none.
 export const rulesText = (state: State): string => {
-  const rules = activeNotes(state).filter(n => n.kind === 'requirement' || n.kind === 'preference')
+  // A rule another session relayed is not the person's own word, so it is not pinned.
+  const rules = activeNotes(state).filter(n => (n.kind === 'requirement' || n.kind === 'preference') && n.via === undefined)
   if (rules.length === 0) return ''
   const shown = rules.slice(-MAX_RULES)
   const older = rules.length - shown.length

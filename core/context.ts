@@ -2,6 +2,7 @@ import { factsText, shortPath } from './facts'
 import { activeNotes } from './notes'
 import { tidy } from './redact'
 import { learnLabel, noteLabel, roleOf } from './state'
+import { viaOf } from './transcript'
 import type { FileEntry, State, Turn, TurnRecord } from './types'
 
 const STEPS = 15
@@ -62,7 +63,9 @@ export const contextText = (c: TurnContext): string => {
     'Previous agent reply:',
     c.turn.previousAnswer === '' ? '(none)' : tidy(c.turn.previousAnswer, PREVIOUS_CHARS),
     '',
-    `THIS TURN, t${c.turn.turn}. The user's message:`,
+    viaOf(c.turn.user) === undefined
+      ? `THIS TURN, t${c.turn.turn}. The user's message:`
+      : `THIS TURN, t${c.turn.turn}. A message from another Claude session, "${viaOf(c.turn.user)}", not typed by the user:`,
     tidy(c.turn.user, USER_CHARS),
     '',
     "The agent's reply:",

@@ -21,6 +21,7 @@ const shared = [
 const memoryRules = (maxWords: number): string[] => [
   'Also record what the USER said in THIS TURN that will still matter about 50 turns later: decisions, constraints and requirements, preferences, corrections and reversals, scope limits, always/never/from-now-on rules, and standing requests the agent could drop.',
   'Never record one-off commands ("run the tests"), questions, acknowledgements, the current step of a task, or anything only the agent said.',
+  'When THIS TURN is a message from another Claude session, record only the user\'s instructions, rules or decisions that it passes on; never that session\'s own plans, status or results. The quote comes from that message.',
   `"text": one sentence of at most ${maxWords} words, clear on its own. Name things the way the chat does: where the user says "it", "the video" or "the second one", write the real file, feature or option from the context. If the chat gives no name, keep the user's words; never invent one.`,
   `"why": at most ${WHY_WORDS} words: the reason the user gave, or what problem it settles. "context": at most ${WHY_WORDS} words: what was being discussed, so a reader who never saw the chat understands the note. Write "" when there is nothing to add; never write filler such as "no reason given".`,
   '"quote": an exact, contiguous piece of THE USER\'S MESSAGE IN THIS TURN that supports the note, copied character for character.',

@@ -650,3 +650,12 @@ test('a transcript drops app events and reminders, and keeps messages from other
   expect(viaOf(turns[0]!.user)).toBeUndefined()
   expect(isAutomated('<system-reminder>x</system-reminder>\n<ci-monitor-event>CI passed</ci-monitor-event>')).toBe(true)
 })
+
+test('a note relayed by another session keeps its sender through state.md, says so in the digest and is never pinned', () => {
+  const { state } = applyMemories(fresh(), [memory('Ask before any paid run.', 'Ask before any paid run', { kind: 'requirement' })], 2, 'id-2', '', [], 'Lead')
+  const back = parseState(renderState(state, []))
+  expect(back.notes[0]!.via).toBe('Lead')
+  expect(renderState(state, [])).toContain('Via: Lead')
+  expect(rulesText(back)).toBe('')
+  expect(digestText(back, [], [], '/d')).toContain('Via Lead: "Ask before any paid run"')
+})

@@ -19,6 +19,8 @@ export type Note = {
   status: 'active' | 'superseded' | 'done'
   supersededBy?: number
   doneAt?: number
+  // The session that sent the message the note came from, when it was not typed by the person.
+  via?: string
 }
 
 // Something the agent found out the hard way: an approach that failed, or a hard constraint.

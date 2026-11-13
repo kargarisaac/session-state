@@ -7,6 +7,7 @@ import { runGate } from './gate'
 import { addUsage, emptyUsage } from './ledger'
 import { activeNotes, applyMemories, openAsks } from './notes'
 import { applyFileRoles, applyLearnings, learnLabel, noteLabel } from './state'
+import { viaOf } from './transcript'
 import type { CompleteResult, Config, ExtractEvent, FileEntry, Host, LedgerEvent, Moved, State, Step, Turn, TurnRecord } from './types'
 
 export type Ledger = { state: State; steps: readonly string[]; archive: readonly TurnRecord[]; files: readonly FileEntry[] }
@@ -85,7 +86,7 @@ export const processTurn = async (host: Host, config: Config, ledger: Ledger, tu
   dropped.push(...learned.dropped)
   const roles = got === undefined ? [] : checkFileRoles(got.files, turn.facts.edited, cwd)
 
-  const notes = applyMemories(state, memories?.kept ?? [], turn.turn, turn.turnId, got?.title ?? '', done)
+  const notes = applyMemories(state, memories?.kept ?? [], turn.turn, turn.turnId, got?.title ?? '', done, viaOf(turn.user))
   const withLearnings = applyLearnings(notes.state, learned.kept, turn.turn)
   const next = applyFileRoles(withLearnings.state, roles)
   const moved = [...notes.moved, ...withLearnings.moved]
