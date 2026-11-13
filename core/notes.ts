@@ -1,5 +1,5 @@
 import { KINDS } from './types'
-import { topicIndex, topicOf } from './state'
+import { topicNames, topicOf } from './state'
 import type { Kind, Memory, Moved, Note, State } from './types'
 
 export const activeNotes = (state: State): Note[] => state.notes.filter(n => n.status === 'active')
@@ -161,7 +161,10 @@ const SYSTEM_CHARS = 3000
 // The topic index and the core rules for the system prompt, together at most about 3 KB. Both change only when a
 // topic or a core rule changes, so the prompt cache stays valid.
 export const systemTexts = (state: State): [index: string, rules: string] => {
-  const lines = topicIndex(state).split('\n').filter(Boolean)
+  const lines = topicNames(state).map(t => {
+    const summary = (state.topics[t] ?? '').replace(/\s+/g, ' ').trim()
+    return `- ${t}${summary === '' ? '' : `: ${summary}`}`
+  })
   let shown = 0
   while (shown < lines.length && ['Topic index:', ...lines.slice(0, shown + 1), '(more in state.md)'].join('\n').length <= INDEX_CHARS) shown++
   const index = lines.length === 0 ? '' : ['Topic index:', ...lines.slice(0, shown), ...(shown < lines.length ? ['(more in state.md)'] : [])].join('\n')
