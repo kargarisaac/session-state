@@ -131,14 +131,15 @@ export const consolidate = async (host: Host, state: State, steps: string, archi
       system: 'Consolidate the session ledger. Return only JSON with merges [{keep,drop:[ids]}], replaces [{old,new}], done [ask ids], dropped [{id,reason}], topics [{name,summary}], assign [{id,topic}]. Use numeric ids. Merge only notes of the same kind, keep the lowest id. Replace only when a newer active note supersedes an older one. Mark only clearly finished asks done. Drop only asks clearly abandoned or exact duplicates. Never drop rules, decisions, preferences, or corrections. Include all current topics in index order and assign every surviving Unsorted note. Keep topic summaries to one line.',
       prompt: [
         `State:\n${renderState(state, files)}`,
-        `Last steps:\n${steps.split('\n').filter(l => l.startsWith('- t')).slice(-STEP_LINES).join('\n')}`,
+        `Last steps:\n${steps.split('\n').filter(l => { const match = /^- t(\d+) · /.exec(l); return match !== null && Number(match[1]) > since }).slice(-STEP_LINES).join('\n')}`,
         `User messages since the last pass:\n${archive
           .filter(t => t.turn > since && !isAutomated(t.user) && viaOf(t.user) === undefined)
           .slice(-MESSAGES)
           .map(t => `t${t.turn}: ${tidy(t.user, MESSAGE_CHARS)}`)
           .join('\n')}`,
       ].join('\n\n'),
-      effort: 'high',
+      effort: 'medium',
+      maxTokens: 12000,
     })
     usage = result.usage
     if (!result.isOk) throw new Error(result.reason)

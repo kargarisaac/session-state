@@ -33,12 +33,17 @@ export const processTurn = async (host: Host, config: Config, ledger: Ledger, tu
   const start = await host.now()
   let usage = emptyUsage()
   let failure = ''
+  let calls = 0
+  const maxTokens = mode === 'extract' ? 12000 : 2000
+  const f = turn.facts
+  const trivial = gate.event.action === 'skip' && f.edited.length === 0 && f.commands === 0 && f.failures.length === 0 && Object.values(f.tools ?? {}).every(n => n === 0) && turn.answer.length < 1500
 
   const ask = async (prompt: string): Promise<Extraction | undefined> => {
     for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
       let reply: CompleteResult
       try {
-        reply = await host.complete({ system, prompt, effort })
+        calls++
+        reply = await host.complete({ system, prompt, effort, maxTokens: Math.min(16000, maxTokens * 2 ** attempt) })
       } catch (err) {
         reply = { isOk: false, reason: `threw ${String(err).slice(0, 120)}`, usage: emptyUsage() }
       }
@@ -58,30 +63,19 @@ export const processTurn = async (host: Host, config: Config, ledger: Ledger, tu
   }
 
   let context = base
-  let got = await ask(contextText(context))
+  let got = trivial ? undefined : await ask(contextText(context, mode))
   // One look further back, only when Haiku names an archived turn it was not shown in full.
   const need = mode === 'extract' ? got?.need : undefined
   const looked = need === undefined ? undefined : earlier.find(r => r.turn === need)
   const needTopic = mode === 'extract' && got?.needTopic !== undefined && topicNames(state).includes(got.needTopic) && !base.topics?.includes(got.needTopic) ? got.needTopic : undefined
   if (looked !== undefined || needTopic !== undefined) {
     context = { ...base, looked, topics: needTopic === undefined ? base.topics : [...(base.topics ?? []), needTopic] }
-    got = (await ask(contextText(context))) ?? got
+    got = (await ask(contextText(context, mode))) ?? got
   }
 
   const active = activeNotes(state)
   const dropped: string[] = []
-  let memories = got === undefined || mode === 'summarize' ? undefined : checkMemories(got.memories, turn.user, active, config.maxWords, turn.turn)
-  if (got !== undefined && memories !== undefined && memories.overLong.length > 0) {
-    const list = memories.overLong.map(m => `"${m.text}"`).join('; ')
-    const again = await ask(
-      `${contextText(context)}\n\nThese notes were over ${config.maxWords} words: ${list}. Reply with the full JSON again, every note at most ${config.maxWords} words.`,
-    )
-    if (again !== undefined) {
-      got = { ...again, step: again.step.text === '' ? got.step : again.step }
-      memories = checkMemories(again.memories, turn.user, active, config.maxWords, turn.turn)
-    }
-    dropped.push(...memories.overLong.map(m => `too long: ${m.text.slice(0, 40)}`))
-  }
+  const memories = got === undefined || mode === 'summarize' ? undefined : checkMemories(got.memories, turn.user, active, config.maxWords, turn.turn)
   dropped.push(...(memories?.dropped ?? []))
 
   const done = got === undefined ? [] : checkDone(got.done, openAsks(state))
@@ -104,7 +98,7 @@ export const processTurn = async (host: Host, config: Config, ledger: Ledger, tu
   ]
   const step: Step = {
     turn: turn.turn,
-    outcome: turn.isAborted ? 'aborted' : got === undefined ? 'unrecorded' : got.step.outcome,
+    outcome: turn.isAborted ? 'aborted' : trivial ? 'ok' : got === undefined ? 'unrecorded' : got.step.outcome,
     text: checkStep(got?.step.text ?? '', turn.user),
     facts: factsText(turn.facts, cwd),
     added,
@@ -117,6 +111,7 @@ export const processTurn = async (host: Host, config: Config, ledger: Ledger, tu
     turnId: turn.turnId,
     model: config.haikuModel,
     mode,
+    calls,
     ms: (await host.now()) - start,
     usage,
     kept: memories?.kept.length ?? 0,
@@ -126,7 +121,7 @@ export const processTurn = async (host: Host, config: Config, ledger: Ledger, tu
     ...(looked === undefined ? {} : { need: looked.turn }),
     ...(got === undefined ? {} : { topics: got.topics }),
     dropped,
-    ...(got === undefined ? { error: failure } : {}),
+    ...(got === undefined && !trivial ? { error: failure } : {}),
   }
   return { state: next, moved, step, events: [gate.event, event] }
 }

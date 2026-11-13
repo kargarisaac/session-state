@@ -65,7 +65,7 @@ const reply = (over: { memories?: object[]; step?: string; title?: string; done?
 
 // A host whose Jev answer and Haiku replies are scripted; it records every Haiku request.
 const fakeHost = (p: number | 'down', replies: CompleteResult[]) => {
-  const calls = { post: 0, complete: 0, requests: [] as { system: string; prompt: string; effort?: string }[] }
+  const calls = { post: 0, complete: 0, requests: [] as { system: string; prompt: string; effort?: string; maxTokens?: number }[] }
   const queue = [...replies]
   const host: Host = {
     now: async () => 1000,
@@ -219,7 +219,7 @@ test('only extraction asks for notes about the user; summarization says memories
   expect(systemPrompt('summarize', 15).includes('"need"')).toBe(false)
 })
 
-test('memory checks drop invented quotes, over-long notes and duplicates, and tidy ids and reasons', async () => {
+test('memory checks drop invented quotes and duplicates, clip long notes, and tidy ids and reasons', async () => {
   const { state } = applyMemories(fresh(), [memory('Use Postgres.', 'use Postgres')], 1, 'id-1', '')
   const user = 'Actually use SQLite, not Postgres. Keep it simple.'
   const longWhy = Array.from({ length: 80 }, (_, i) => `w${i}`).join(' ')
@@ -236,11 +236,12 @@ test('memory checks drop invented quotes, over-long notes and duplicates, and ti
     15,
     5,
   )
-  expect(checked.kept.length).toBe(2)
+  expect(checked.kept.length).toBe(3)
   expect(checked.kept[0]!.supersedes).toEqual([1])
   expect(checked.kept[0]!.refersTo).toEqual([1])
   expect(wordCount(checked.kept[0]!.why)).toBe(60)
-  expect(checked.overLong.length).toBe(1)
+  expect(wordCount(checked.kept[2]!.text)).toBe(15)
+  expect(checked.kept[2]!.quote).toBe('Keep it simple')
   expect(checked.dropped.length).toBe(2)
 })
 
@@ -520,7 +521,7 @@ test('a real Jev answer parses, a malformed one reports an error, and the gate s
 
 test('below the threshold one low-effort summarization runs: a step, no notes about the user', async () => {
   const { host, calls } = fakeHost(0.2, [reply({ step: 'Ran the tests; all pass.', memories: [{ kind: 'decision', text: 'X.', quote: 'run the tests' }] })])
-  const out = await processTurn(host, config(), ledgerOf(fresh()), turn('run the tests', 2))
+  const out = await processTurn(host, config(), ledgerOf(fresh()), turn('run the tests', 2, { facts: withFacts({ commands: 1 }) }))
   expect(calls.complete).toBe(1)
   expect(calls.requests[0]!.effort).toBe('low')
   expect(out.events[0]).toMatchObject({ type: 'gate', action: 'skip', p: 0.2 })
@@ -536,7 +537,7 @@ test('above the threshold one extraction at the set effort saves a rich note wit
   const out = await processTurn(host, config(), ledgerOf(fresh()), turn('Please use SQLite from now on.', 7))
   expect(calls.post).toBe(1)
   expect(calls.complete).toBe(1)
-  expect(calls.requests[0]!.effort).toBe('high')
+  expect(calls.requests[0]!.effort).toBe('medium')
   expect(out.state.front.title).toBe('Storage choice')
   expect(out.state.notes[0]).toMatchObject({ id: 1, turn: 7, text: 'Use SQLite for storage.', why: 'No server to run.', context: 'Picking a store.', source: { turnId: 'id-7', refersTo: [] } })
   expect(out.step.added).toEqual(['M-001'])
@@ -600,7 +601,7 @@ test('recent topics are shown and one more topic can be requested', async () => 
 test('summarize updates Now and clips it to fifteen lines', async () => {
   const lines = Array.from({ length: 18 }, (_, i) => `Line ${i + 1}`)
   const { host, calls } = fakeHost(0.2, [reply({ now: lines.join('\n') })])
-  const out = await processTurn(host, config(), ledgerOf({ ...fresh(), now: 'Old goal' }), turn('run tests', 2))
+  const out = await processTurn(host, config(), ledgerOf({ ...fresh(), now: 'Old goal' }), turn('run tests', 2, { facts: withFacts({ commands: 1 }) }))
   expect(calls.requests[0]!.prompt).toContain('Old goal')
   expect(out.state.now).toBe(lines.slice(0, 15).join('\n'))
   const noNow = fakeHost(0.2, [reply()])
@@ -608,12 +609,16 @@ test('summarize updates Now and clips it to fifteen lines', async () => {
   expect(next.state.now).toBe(out.state.now)
 })
 
-test('an over-long note is asked again once and the short version is kept', async () => {
+test('an over-long note is clipped without another call', async () => {
   const long = { kind: 'decision', text: 'one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen', quote: 'use SQLite' }
   const { host, calls } = fakeHost(0.95, [reply({ memories: [long] }), reply({ memories: [{ kind: 'decision', text: 'Use SQLite.', quote: 'use SQLite' }] })])
   const out = await processTurn(host, config(), ledgerOf(fresh()), turn('use SQLite please'))
-  expect(calls.complete).toBe(2)
-  expect(activeNotes(out.state).map(n => n.text)).toEqual(['Use SQLite.'])
+  expect(calls.complete).toBe(1)
+  expect(activeNotes(out.state).map(n => n.text)).toEqual(['one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen…'])
+  expect(activeNotes(out.state)[0]!.quote).toBe('use SQLite')
+  const invalid = fakeHost(0.95, [reply({ memories: [{ ...long, quote: 'made up quote' }] })])
+  const rejected = await processTurn(invalid.host, config(), ledgerOf(fresh()), turn('use SQLite please'))
+  expect(rejected.state.notes).toEqual([])
 })
 
 test('a note whose quote is invented is dropped, not saved', async () => {
@@ -896,9 +901,12 @@ test('consolidation uses only user messages since the last pass', async () => {
   const state = fresh()
   const { host, calls } = fakeHost(1, [json({ merges: [], replaces: [], done: [], dropped: [], topics: [], assign: [] })])
   const archive = [turn('old words', 1), turn('new words', 2), turn('<cross-session-message name="lead">other words</cross-session-message>', 3)].map(t => turnRecord(t, 1000))
-  const out = await consolidate(host, state, '- t2 · ✓ · Worked', archive, 1, 3, [])
+  const out = await consolidate(host, state, '- t1 · ✓ · Old step\n- t2 · ✓ · Worked', archive, 1, 3, [])
   expect(out.error).toBe(undefined)
-  expect(calls.requests[0]!.effort).toBe('high')
+  expect(calls.requests[0]!.effort).toBe('medium')
+  expect(calls.requests[0]!.maxTokens).toBe(12000)
+  expect(calls.requests[0]!.prompt).toContain('Worked')
+  expect(calls.requests[0]!.prompt.includes('Old step')).toBe(false)
   expect(calls.requests[0]!.prompt).toContain('new words')
   expect(calls.requests[0]!.prompt.includes('old words')).toBe(false)
   expect(calls.requests[0]!.prompt.includes('other words')).toBe(false)
@@ -912,4 +920,68 @@ test('opposite rules are not suggested as the same rule', () => {
 test('a note whose text has double quotes round-trips through the topic layout', async () => {
   const state = { ...fresh(), notes: [{ id: 1, turn: 2, kind: 'requirement' as const, text: 'Call it "Nablo Data Agent" in public.', why: 'Plain names.', context: 'Blog copy.', quote: 'say "Nablo Data Agent"', source: { turnId: 'u2', refersTo: [1] }, status: 'active' as const, topic: 'Naming', count: 2, lastTurn: 9, via: 'lead' }] }
   expect(parseState(renderState(state, [])).notes).toEqual(state.notes)
+})
+
+
+test('summaries see shorter context while extractions keep the full context', () => {
+  const state = { ...fresh(), now: 'Working', topics: { Storage: 'A detailed topic summary' } }
+  const earlier = Array.from({ length: 12 }, (_, i) => turnRecord(turn(`earlier ${i + 1}`, i + 1), 0))
+  const context = { state, steps: Array.from({ length: 15 }, (_, i) => `step ${i + 1}!`), earlier, files: [{ path: '/work/demo/file.ts', reads: 1, edits: 0, first: 1, last: 1, role: '', score: 1 }], topics: ['Storage'], turn: turn('go', 13, { previousAnswer: 'START' + 'x'.repeat(1500) + 'END' }) }
+  const small = contextText(context, 'summarize')
+  const full = contextText(context, 'extract')
+  expect(small).toContain('Working')
+  expect(small).toContain('Storage')
+  expect(small.includes('A detailed topic summary')).toBe(false)
+  expect(small.includes('Recent topic sections:')).toBe(false)
+  expect(small.includes('file.ts')).toBe(false)
+  expect(small.includes('step 10!')).toBe(false)
+  expect(small).toContain('step 11!')
+  expect(small.includes('earlier 9\n')).toBe(false)
+  expect(small).toContain('earlier 10')
+  expect(small.includes('START')).toBe(false)
+  expect(small).toContain('END')
+  expect(full).toContain('A detailed topic summary')
+  expect(full).toContain('file.ts')
+  expect(full).toContain('step 1!')
+  expect(full).toContain('START')
+})
+
+test('retries raise the output cap and count all calls', async () => {
+  for (const bad of [{ isOk: false as const, reason: 'max-tokens', usage: USAGE }, { isOk: true as const, text: '', usage: USAGE }, { isOk: true as const, text: '{broken', usage: USAGE }]) {
+    const extract = fakeHost(0.9, [bad, reply()])
+    const result = await processTurn(extract.host, config(), ledgerOf(fresh()), turn('keep it', 2))
+    expect(extract.calls.requests.map(r => r.maxTokens)).toEqual([12000, 16000])
+    expect(result.events[1]).toMatchObject({ calls: 2, mode: 'extract' })
+    const summary = fakeHost(0.1, [bad, reply()])
+    const short = await processTurn(summary.host, config(), ledgerOf(fresh()), turn('go', 2, { facts: withFacts({ commands: 1 }) }))
+    expect(summary.calls.requests.map(r => r.maxTokens)).toEqual([2000, 4000])
+    expect(short.events[1]).toMatchObject({ calls: 2, mode: 'summarize' })
+  }
+})
+
+test('only a gate skip with no work and a short reply avoids the model', async () => {
+  const state = { ...fresh(), now: 'Keep this goal' }
+  const skipped = fakeHost(0.1, [])
+  const result = await processTurn(skipped.host, config(), ledgerOf(state), turn('Okay', 2, { facts: withFacts({ read: ['/read'] }) }))
+  expect(skipped.calls.complete).toBe(0)
+  expect(result.state.now).toBe('Keep this goal')
+  expect(result.step).toMatchObject({ outcome: 'ok', text: 'Asked: Okay' })
+  expect(result.events[1]).toMatchObject({ mode: 'summarize', calls: 0 })
+  for (const over of [
+    { facts: withFacts({ edited: ['x'] }) }, { facts: withFacts({ commands: 1 }) },
+    { facts: withFacts({ failures: [{ command: 'x', error: 'bad' }] }) },
+    { facts: withFacts({ tools: { Search: 1 } }) }, { answer: 'x'.repeat(1500) },
+  ]) {
+    const host = fakeHost(0.1, [reply()])
+    await processTurn(host.host, config(), ledgerOf(state), turn('Okay', 2, over))
+    expect(host.calls.complete).toBe(1)
+  }
+  for (const p of [0.9, 'down' as const]) {
+    const host = fakeHost(p, [reply()])
+    await processTurn(host.host, config(), ledgerOf(state), turn('Okay', 2))
+    expect(host.calls.complete).toBe(1)
+  }
+  const off = fakeHost(0.1, [reply()])
+  await processTurn(off.host, config({ gate: 'off' }), ledgerOf(state), turn('Okay', 2))
+  expect(off.calls.complete).toBe(1)
 })

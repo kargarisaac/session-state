@@ -47,7 +47,7 @@
     "effort": {
       "type": "string",
       "title": "Extractor effort",
-      "description": "How hard the extractor thinks. Default: high.",
+      "description": "How hard the extractor thinks. Default: medium.",
       "options": [
         "low",
         "medium",
@@ -55,7 +55,7 @@
         "xhigh",
         "max"
       ],
-      "default": "high"
+      "default": "medium"
     },
     "maxWords": {
       "type": "number",

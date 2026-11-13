@@ -27,6 +27,7 @@ export type ExtractEvent = {
   turnId: string
   model: string
   mode: 'summarize' | 'extract'
+  calls: number
   ms: number
   usage: Usage
   kept: number
