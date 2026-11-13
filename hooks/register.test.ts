@@ -1354,8 +1354,12 @@ test('hundreds of notes, learnings and files still give a digest under 8,000 cha
   expect(digest.length).toBeLessThanOrEqual(8000)
   expect(digest).toContain('(cut to fit; the rest is in state.md)')
   expect(digest.endsWith(`Full ledger: ${FOLDER}/state.md (steps.md has every turn).`)).toBe(true)
-  expect(digest).toContain('M-001 (t1) Note number 1')
-  expect(digest.indexOf('## Open asks')).toBeLessThan(digest.indexOf('## Decisions and rules'))
+  // Newest first, and each section has its own budget, so the newest notes, the learnings and the files all show.
+  expect(digest).toContain('M-010 (t10) Note number 10')
+  expect(digest).toContain('M-300 (t300) Note number 300')
+  expect(digest).toContain('L-080')
+  expect(digest).toContain('## Files that matter')
+  expect(digest.indexOf('## Open asks')).toBeLessThan(digest.indexOf('## Rules and corrections'))
   // No heading stands alone, with its items all cut.
   expect(/## [^\n]*\n(\n## |\(cut to fit)/.test(digest)).toBe(false)
 })

@@ -389,14 +389,24 @@ test('edited and recent files rank above files read once long ago, and keep thei
   expect(ranked[0]).toMatchObject({ edits: 1, reads: 1, role: 'state.md writer' })
 })
 
-test('the digest puts asks and rules first, cuts the least needed to fit, and ends with the path', async () => {
-  const { state } = applyMemories(fresh(), [memory('Rename the video.', 'rename it', { kind: 'ask' }), memory('Use SQLite.', 'use SQLite', { why: 'simple' })], 2, '', '')
+test('the digest puts the last steps, then asks, then rules first, newest first, and ends with the path', async () => {
+  const { state } = applyMemories(
+    fresh(),
+    [memory('Rename the video.', 'rename it', { kind: 'ask' }), memory('Keep it local.', 'keep it local', { kind: 'requirement' }), memory('Use SQLite.', 'use SQLite', { why: 'simple' })],
+    2,
+    '',
+    '',
+  )
+  const more = applyMemories(state, [memory('Never push to main.', 'never push', { kind: 'correction' })], 5, '', '').state
   const steps = Array.from({ length: 30 }, (_, i) => `- t${i + 1} · ✓ · Step number ${i + 1} with some words to fill the line`)
-  const full = digestText(state, steps, [], '/h/ledger')
-  expect(full.indexOf('## Open asks')).toBeLessThan(full.indexOf('## Decisions and rules'))
-  expect(full).toContain('- M-002 (t2) Use SQLite. Why: simple User: "use SQLite"')
+  const full = digestText(more, steps, [], '/h/ledger')
+  expect(full.indexOf('## Recent steps')).toBeLessThan(full.indexOf('## Open asks'))
+  expect(full.indexOf('## Open asks')).toBeLessThan(full.indexOf('## Rules and corrections'))
+  expect(full.indexOf('## Rules and corrections')).toBeLessThan(full.indexOf('## Decisions'))
+  expect(full.indexOf('Never push to main.')).toBeLessThan(full.indexOf('Keep it local.'))
+  expect(full).toContain('- M-003 (t2) Use SQLite. Why: simple User: "use SQLite"')
   expect(full).toContain('- t30 ·')
-  expect(full.includes('- t20 ·')).toBe(false)
+  expect(full.includes('- t25 ·')).toBe(false)
   expect(full.endsWith('Full ledger: /h/ledger/state.md (steps.md has every turn).')).toBe(true)
   const small = digestText(state, steps, [], '/h/ledger', 400)
   expect(small.length).toBeLessThan(400)

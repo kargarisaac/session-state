@@ -4,7 +4,9 @@ import { learnLabel, noteLabel, roleOf } from './state'
 import type { FileEntry, State } from './types'
 
 const CAP = 8000
-const STEPS = 10
+const STEPS = 5
+// The most a section may take of the cap, so one long section cannot push the others out.
+const SHARE = { steps: 0.15, asks: 0.2, rules: 0.3, learnings: 0.1, files: 0.1, decisions: 0.15 } as const
 // One long note, quote or path must not use up the room of the rest.
 const TEXT_CHARS = 400
 const WHY_CHARS = 200
@@ -41,19 +43,28 @@ export const digestText = (
   unrecorded: readonly Unrecorded[] = [],
 ): string => {
   const cwd = state.front.cwd ?? ''
-  const active = activeNotes(state)
+  // Newest first: what the cap cuts is the oldest.
+  const active = [...activeNotes(state)].reverse()
+  const isRule = (k: string) => k === 'requirement' || k === 'preference' || k === 'correction'
   const note = (n: (typeof active)[number]) =>
     `- ${noteLabel(n.id)} (t${n.turn}) ${short(n.text, TEXT_CHARS)}${n.why === '' ? '' : ` Why: ${short(n.why, WHY_CHARS)}`}${n.quote === '' ? '' : ` ${n.via === undefined ? 'User' : `Via ${n.via}`}: "${short(n.quote, QUOTE_CHARS)}"`}`
-  const blocks: [string, string[]][] = [
+  // In order of need after a compaction: what was just going on, what is still to do, the rules, then the rest.
+  const blocks: [string, string[], number][] = [
     [
       'Not in the ledger yet (these turns are still being recorded, so the sections below leave them out)',
       unrecorded.slice(-UNRECORDED).map(t => `- t${t.turn}: ${short(t.user, UNRECORDED_CHARS)}`),
+      1,
     ],
-    ['Open asks', active.filter(n => n.kind === 'ask').map(note)],
-    ['Decisions and rules', active.filter(n => n.kind !== 'ask').map(note)],
-    ['Learnings', state.learnings.filter(l => l.status === 'active').map(l => `- ${learnLabel(l.id)} [${l.kind}] ${short(l.text, TEXT_CHARS)}`)],
-    ['Files that matter', files.map(f => short(`- ${shortPath(f.path, cwd)}${roleOf(state, f.path) === '' ? '' : ` · ${roleOf(state, f.path)}`}`, LINE_CHARS))],
-    ['Recent steps', steps.slice(-STEPS).map(s => short(s, LINE_CHARS))],
+    ['Recent steps', steps.slice(-STEPS).map(s => short(s, LINE_CHARS)), SHARE.steps],
+    ['Open asks, newest first', active.filter(n => n.kind === 'ask').map(note), SHARE.asks],
+    ['Rules and corrections, newest first', active.filter(n => isRule(n.kind)).map(note), SHARE.rules],
+    [
+      'Learnings, newest first',
+      [...state.learnings].reverse().filter(l => l.status === 'active').map(l => `- ${learnLabel(l.id)} [${l.kind}] ${short(l.text, TEXT_CHARS)}`),
+      SHARE.learnings,
+    ],
+    ['Files that matter', files.map(f => short(`- ${shortPath(f.path, cwd)}${roleOf(state, f.path) === '' ? '' : ` · ${roleOf(state, f.path)}`}`, LINE_CHARS)), SHARE.files],
+    ['Decisions, newest first', active.filter(n => n.kind === 'decision').map(note), SHARE.decisions],
   ]
   if (blocks.every(([, items]) => items.length === 0)) return ''
   const head = `The chat was just compacted. This is the session ledger as it stands, so nothing the user asked or decided is lost.`
@@ -63,16 +74,18 @@ export const digestText = (
   // Room is kept for the tail and the cut notice, so the whole digest stays under the cap.
   let size = head.length + tail.length + cut.length + 3
   let isCut = false
-  for (const [title, items] of blocks) {
+  for (const [title, items, share] of blocks) {
     const heading = `\n## ${title}`
     let isOpen = false
+    let used = 0
     for (const item of items) {
       // A heading comes with its first item, never alone.
       const need = (isOpen ? 0 : heading.length + 1) + item.length + 1
-      if (size + need > cap) {
+      if (size + need > cap || used + need > share * cap) {
         isCut = true
         break
       }
+      used += need
       if (!isOpen) lines.push(heading)
       isOpen = true
       lines.push(item)
