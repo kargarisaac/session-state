@@ -32,21 +32,11 @@ Work as usual. Then:
 - `/session-state rebuild` moves the chat's ledger files to `before-rebuild/` (`before-rebuild-2/` and on, for the next rebuilds) and reads the whole chat again from Claude Code's transcript. It leaves the files alone when the transcript has no turns to read, or when the chat continues one that was compacted under a new session id (its transcript starts after the compaction, so the earlier turns are only in the ledger).
 - Ask the agent "what did I decide about X?" and it reads the ledger.
 
-The panel reads `state.md`, `steps.md` and `history.md` again every few seconds, so a hand edit shows without reopening it. Closing the panel, or asking for a tab, takes the Ledger tab back to `state.md`.
+The panel reads `state.md`, `steps.md` and `history.md` again when they change, so a hand edit shows without reopening it. Closing the panel, or asking for a tab, takes the Ledger tab back to `state.md`.
 
-**Steps:** one line per turn, with what the tools did and what the turn added (`+M-002`) or finished (`done M-002`).
+![The side panel: Steps, Ledger and Stats tabs after a four-turn demo chat](docs/panel.png)
 
-![Steps tab: one line per turn](docs/panel-steps.png)
-
-**Ledger:** `state.md` as it stands: open asks, decisions and rules with why and your words, learnings, and the files that matter. When a rule in this chat has mostly the same words as a rule in other chats of the same project, it is listed under "Suggested for AGENTS.md". The mod never writes that file; copying it is up to you.
-
-![Ledger tab: notes, learnings and files](docs/panel-ledger.png)
-
-**Stats:** the gate's decision for each turn, how many turns got a summary or an extraction, and the cost.
-
-![Stats tab: models, counts, cost and gate decisions](docs/panel-stats.png)
-
-These come from a 7-turn demo chat. In turn 4 the user answered "the first one" (pytest); Jev scored that short reply 0.32, so it got a step but no note.
+**Steps** has one line per turn, with what the tools did and what the turn added (`+M-002`) or finished (`✓ M-002`). **Ledger** shows the Now block, open asks, then the rules by topic with how often you said each one, rules suggested for `AGENTS.md`, learnings and files. **Stats** shows the gate's decisions, how many turns got a summary or an extraction, compactions, digests delivered, the agent's reads of the ledger, and the cost.
 
 Each chat gets a folder, `~/.claude/session-state/<project>/<date>_<id8>/`, with an `INDEX.md` per project:
 
