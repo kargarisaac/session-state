@@ -159,7 +159,20 @@ test('tool calls become the turn facts: reads, edits, failed commands and commit
   expect(f.failures.length).toBe(1)
   expect(f.failures[0]!.error.includes('abcdef1234567890')).toBe(false)
   expect(f.commits).toEqual(['3fa2c1b Fix parser'])
-  expect(factsText(f, CWD)).toBe('edited b.ts · read 1 file · 2 commands, 1 failed · commit 3fa2c1b Fix parser')
+  expect(factsText(f, CWD)).toBe('edited b.ts · read 1 file · 2 commands · 1 failed · commit 3fa2c1b Fix parser')
+})
+
+test('every other tool is counted by name, MCP tools by server, and their failures are kept', async () => {
+  let f = emptyFacts()
+  for (let i = 0; i < 3; i++) f = addToolCall(f, { tool: 'mcp__Claude_Browser__computer', input: { action: 'click' }, isError: false, text: '' })
+  f = addToolCall(f, { tool: 'Agent', input: { description: 'audit' }, isError: false, text: '' })
+  f = addToolCall(f, { tool: 'mcp__Claude_Browser__navigate', input: { url: 'http://localhost:3000' }, isError: true, text: 'site refused' })
+  f = addToolCall(f, { tool: 'mcp__ccd_turn__update_plan', input: {}, isError: false, text: '' })
+  f = addToolCall(f, { tool: 'ToolSearch', input: {}, isError: false, text: '' })
+  expect(f.tools).toEqual({ Claude_Browser: 4, Agent: 1 })
+  expect(f.failures[0]!.command).toContain('mcp__Claude_Browser__navigate')
+  expect(f.failures[0]!.error).toBe('site refused')
+  expect(factsText(f, CWD)).toBe('4 Claude_Browser, 1 Agent · 1 failed')
 })
 
 test('a read that failed is not a file the chat touched', async () => {
@@ -562,7 +575,7 @@ test('one turn can finish an ask, record a learning, name a file and replace a d
   expect(out.moved.map(m => m.reason)).toEqual(['superseded', 'done'])
   expect(out.state.learnings.map(l => l.text)).toEqual(['ffmpeg here lacks the h265 codec.'])
   expect(out.state.roles).toEqual({ 'video.ts': 'Renders the product video' })
-  expect(out.step).toMatchObject({ added: ['M-003', 'L-001'], done: ['M-001'], facts: 'edited video.ts · 1 command, 1 failed' })
+  expect(out.step).toMatchObject({ added: ['M-003', 'L-001'], done: ['M-001'], facts: 'edited video.ts · 1 command · 1 failed' })
   expect(out.events[1]).toMatchObject({ kept: 1, learned: 1, closed: 1, roles: 1 })
 })
 

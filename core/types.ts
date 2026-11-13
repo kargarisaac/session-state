@@ -67,6 +67,8 @@ export type TurnFacts = {
   commands: number
   failures: Failure[]
   commits: string[]
+  // Calls to every other tool, by name; MCP tools by server.
+  tools: Record<string, number>
 }
 
 export type Turn = {

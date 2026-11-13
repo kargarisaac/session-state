@@ -1,5 +1,5 @@
 import { redact, tidy } from './redact'
-import type { TurnFacts } from './types'
+import type { Failure, TurnFacts } from './types'
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 const COMMAND_CHARS = 200
@@ -8,7 +8,16 @@ const MAX_FAILURES = 5
 
 export type ToolCall = { tool: string; input: Record<string, unknown>; isError: boolean; text: string }
 
-export const emptyFacts = (): TurnFacts => ({ read: [], edited: [], commands: 0, failures: [], commits: [] })
+// Bookkeeping tools that say nothing about the work.
+const QUIET = /^(ToolSearch|TodoWrite|Task(Create|Update|List|Get)|mcp__ccd_turn__.*)$/
+
+export const emptyFacts = (): TurnFacts => ({ read: [], edited: [], commands: 0, failures: [], commits: [], tools: {} })
+
+// `mcp__Claude_Browser__computer` counts as `Claude_Browser`; other tools by their own name.
+const toolLabel = (tool: string): string => /^mcp__(.+?)__/.exec(tool)?.[1] ?? tool
+
+const failure = (f: TurnFacts, command: string, text: string): Failure[] =>
+  [...f.failures, { command: tidy(command, COMMAND_CHARS), error: redact(text).trim().slice(-ERROR_CHARS) }].slice(-MAX_FAILURES)
 
 const add = (list: string[], item: string): string[] => (item === '' || list.includes(item) ? list : [...list, item])
 
@@ -29,14 +38,15 @@ const commitOf = (command: string, text: string): string => {
 export const addToolCall = (f: TurnFacts, call: ToolCall): TurnFacts => {
   if (call.tool === 'Read') return call.isError ? f : { ...f, read: add(f.read, pathOf(call.input)) }
   if (EDIT_TOOLS.has(call.tool)) return call.isError ? f : { ...f, edited: add(f.edited, pathOf(call.input)) }
-  if (call.tool !== 'Bash') return f
+  if (call.tool !== 'Bash') {
+    if (QUIET.test(call.tool)) return f
+    const label = toolLabel(call.tool)
+    const next = { ...f, tools: { ...f.tools, [label]: (f.tools?.[label] ?? 0) + 1 } }
+    return call.isError ? { ...next, failures: failure(f, `${call.tool} ${JSON.stringify(call.input)}`, call.text) } : next
+  }
   const command = typeof call.input.command === 'string' ? call.input.command : ''
   const next = { ...f, commands: f.commands + 1 }
-  if (call.isError) {
-    const error = redact(call.text).trim().slice(-ERROR_CHARS)
-    const failures = [...f.failures, { command: tidy(command, COMMAND_CHARS), error }].slice(-MAX_FAILURES)
-    return { ...next, failures }
-  }
+  if (call.isError) return { ...next, failures: failure(f, command, call.text) }
   if (/\bgit\s+(?:-C\s+\S+\s+)?commit\b/.test(command)) return { ...next, commits: [...f.commits, redact(commitOf(command, call.text))] }
   return next
 }
@@ -53,7 +63,10 @@ export const factsText = (f: TurnFacts, cwd = ''): string => {
   const parts: string[] = []
   if (f.edited.length > 0) parts.push(`edited ${names(f.edited, cwd, 3)}`)
   if (f.read.length > 0) parts.push(`read ${f.read.length} file${f.read.length === 1 ? '' : 's'}`)
-  if (f.commands > 0) parts.push(`${f.commands} command${f.commands === 1 ? '' : 's'}${f.failures.length > 0 ? `, ${f.failures.length} failed` : ''}`)
+  if (f.commands > 0) parts.push(`${f.commands} command${f.commands === 1 ? '' : 's'}`)
+  const tools = Object.entries(f.tools ?? {}).sort((a, b) => b[1] - a[1])
+  if (tools.length > 0) parts.push(tools.map(([name, n]) => `${n} ${name}`).join(', '))
+  if (f.failures.length > 0) parts.push(`${f.failures.length} failed`)
   for (const c of f.commits) parts.push(`commit ${c}`)
   return parts.join(' · ')
 }

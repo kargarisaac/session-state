@@ -216,7 +216,7 @@ test('the main agent\'s tool calls become the turn facts; a subagent\'s do not',
   await settle(clock, files, f => f.has(STEPS))
 
   const step = files.get(STEPS) ?? ''
-  expect(step).toContain('edited core/parse.ts · 1 command, 1 failed')
+  expect(step).toContain('edited core/parse.ts · 1 command · 1 failed')
   expect(step.includes('other.ts')).toBe(false)
   expect(files.get(EVENTS) ?? '').toContain('ENOENT: no such file')
   expect(files.get(STATE) ?? '').toContain('- `core/parse.ts` · edited 1 · t1')
@@ -1327,7 +1327,7 @@ const noteMd = (i: number, kind: string, text: string, why: string, quote: strin
 const stateMd = (notes: string[], learnings: string[] = []) =>
   `---\nsession_id: x\nproject: demo\ncwd: /work/demo\nnext_id: ${notes.length + 1}\nnext_learning: ${learnings.length + 1}\n---\n# Big chat\n\n## Decisions and rules\n${notes.join('\n')}\n## Learnings\n${learnings.join('\n')}`
 const learnMd = (i: number, text: string) => `### L-${pad(i)} · failed · t${i}\n${text}\nEvidence: "boom"\n`
-const turnLine = (turn: number, edited: string[]) => JSON.stringify({ type: 'turn', at: turn, turn, turnId: `u${turn}`, user: 'work', answer: 'ok', facts: { read: [], edited, commands: 0, failures: [], commits: [] } })
+const turnLine = (turn: number, edited: string[]) => JSON.stringify({ type: 'turn', at: turn, turn, turnId: `u${turn}`, user: 'work', answer: 'ok', facts: { read: [], edited, commands: 0, failures: [], commits: [], tools: {} } })
 
 // A compacted chat whose ledger files are as given, and the digest its next typed prompt carries.
 const digestFor = async ($: TestDollar, on: TestOn, md: string, eventsText = '') => {
@@ -1522,7 +1522,7 @@ test('retry runs a failed turn again and rewrites its step line with what it fou
 })
 
 const archived = (turn: number, user: string, answer: string) =>
-  JSON.stringify({ type: 'turn', at: 1, turn, turnId: `old${turn}`, user, answer, facts: { read: [`/work/demo/f${turn}.ts`], edited: [], commands: 0, failures: [], commits: [] } })
+  JSON.stringify({ type: 'turn', at: 1, turn, turnId: `old${turn}`, user, answer, facts: { read: [`/work/demo/f${turn}.ts`], edited: [], commands: 0, failures: [], commits: [], tools: {} } })
 
 test('a long chat whose archive reaches 4 MiB still gets its state and steps written', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
@@ -1605,7 +1605,7 @@ test('two drains started at once record each queued turn once', async ($, on) =>
   expect((files.get(EVENTS) ?? '').match(/"type":"extract"/g)).toHaveLength(2)
 })
 
-const pendingTurn = (n: number, user: string, answer: string) => ({ turn: n, turnId: `t${n}`, user, answer, previousAnswer: '', isAborted: false, facts: { read: [], edited: [], commands: 0, failures: [], commits: [] } })
+const pendingTurn = (n: number, user: string, answer: string) => ({ turn: n, turnId: `t${n}`, user, answer, previousAnswer: '', isAborted: false, facts: { read: [], edited: [], commands: 0, failures: [], commits: [], tools: {} } })
 const extractRun = (turn: number, error?: string) =>
   JSON.stringify({ type: 'extract', at: 1, turn, turnId: `t${turn}`, model: 'm', mode: 'extract', ms: 1, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, kept: 1, learned: 0, closed: 0, roles: 0, dropped: [], ...(error === undefined ? {} : { error }) })
 const RECORDED_STATE =
