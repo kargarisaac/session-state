@@ -8,7 +8,7 @@ import { fileIndex, rankFiles } from '../core/files'
 import { archivedTurns, fitLedger, LEDGER_MAX, parseLedger, parsePending, serializeLedger, serializePending, summarize, turnRecord } from '../core/ledger'
 import { activeNotes, newFront, parseOldNotes, pointerText, systemTexts, upsertIndex } from '../core/notes'
 import { processTurn } from '../core/pipeline'
-import { emptyState, HISTORY_HEAD, historyBlock, learnLabel, noteLabel, parseState, renderState, seedState, topicNames, topicSection } from '../core/state'
+import { emptyState, HISTORY_HEAD, historyBlock, learnLabel, noteLabel, parseState, renderState, seedState, topicNames, topicOf, topicSection } from '../core/state'
 import { appendStep, hasStep, lastStep, stepLines } from '../core/steps'
 import { answersOf, continuesFrom, hasMessage, isAutomated, parseTranscript, withAnswers, withoutReminders } from '../core/transcript'
 import type { Config, Kind, LedgerEvent, State, Turn } from '../core/types'
@@ -963,11 +963,11 @@ export const register: Register = (on, options) => {
       const suggestions = (await readText($, suggestionsOf(folder))).split('\n').filter(line => line.startsWith('- ')).map(line => line.slice(2))
       const wide = Math.max(20, columns - 4)
       // One entry: its id and kind on a line, then what it says, why, and the user's own words.
-      const entry = (id: string, kind: string, tone: ThemeKey, turn: number, text: string, why: string, quote: string) => (
+      const entry = (id: string, kind: string, tone: ThemeKey, turn: number, text: string, why: string, quote: string, count = 1) => (
         <Box key={id} flexDirection="column" marginBottom={1} width={wide}>
           <Text>
             <Text color={tone} bold>{`${kind} `}</Text>
-            <Text dimColor>{`${id} · t${turn}`}</Text>
+            <Text dimColor>{`${id} · t${turn}${count > 1 ? ` · said ${count} times` : ''}`}</Text>
           </Text>
           <Text>{text}</Text>
           {why !== '' && <Text dimColor>{why}</Text>}
@@ -984,10 +984,21 @@ export const register: Register = (on, options) => {
               <Text dimColor>Asks, decisions, rules and what failed collect here as the chat goes on.</Text>
             </Box>
           )}
+          {state.now !== '' && heading('Now')}
+          {state.now !== '' && <Text>{state.now}</Text>}
           {asks.length > 0 && heading('Open asks', asks.length)}
           {asks.map(n => entry(noteLabel(n.id), 'ask', KIND_TONE.ask, n.turn, n.text, n.why, n.quote === '' ? '' : `“${n.quote.replace(/^"|"$/g, '')}”`))}
-          {rules.length > 0 && heading('Decisions and rules', rules.length)}
-          {rules.map(n => entry(noteLabel(n.id), n.kind, KIND_TONE[n.kind], n.turn, n.text, n.why, n.quote === '' ? '' : `“${n.quote.replace(/^"|"$/g, '')}”`))}
+          {topicNames(state).map(topic => {
+            const notes = rules.filter(n => topicOf(n) === topic)
+            if (notes.length === 0) return null
+            return (
+              <Box key={topic} flexDirection="column">
+                {heading(topic, notes.length)}
+                {(state.topics[topic] ?? '') !== '' && <Text dimColor>{state.topics[topic]}</Text>}
+                {notes.map(n => entry(noteLabel(n.id), n.kind, KIND_TONE[n.kind], n.lastTurn ?? n.turn, n.text, n.why, n.quote === '' ? '' : `${n.via === undefined ? '' : `${n.via}: `}“${n.quote.replace(/^"|"$/g, '')}”`, n.count ?? 1))}
+              </Box>
+            )
+          })}
           {suggestions.length > 0 && heading('Suggested for AGENTS.md', suggestions.length)}
           {suggestions.map((text, i) => <Text key={i}>{text}</Text>)}
           {learnings.length > 0 && heading('Learned the hard way', learnings.length)}

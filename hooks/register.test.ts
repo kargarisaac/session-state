@@ -235,6 +235,8 @@ test('a decision above the gate lands in the session folder: state, step, archiv
   const ledger = await bodyOf(ui)
   expect(ledger).toContain('Use SQLite for storage.')
   expect(ledger.includes('session_id:')).toBe(false)
+  // Rules sit under their topic heading; a note with no topic yet is under Unsorted.
+  expect(ledger).toContain('UNSORTED')
   await $.command.run({ command: 'session-state', args: 'stats' } as never)
   await ui.redraw()
   const stats = await textOf(ui)
