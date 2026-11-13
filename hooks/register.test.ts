@@ -162,7 +162,7 @@ test('a decision above the gate lands in the session folder: state, step, archiv
   await settle(clock, files, f => f.has(STEPS))
 
   const md = files.get(STATE) ?? ''
-  expect(md).toContain('### M-001 · decision · t1\nUse SQLite for storage.\nWhy: No server to run.\nQuote: "use SQLite"')
+  expect(md).toContain('- M-001 · decision · Use SQLite for storage. "use SQLite" (t1)')
   expect(md).toContain('session_id: abc12345-0000-0000-0000-000000000000')
   expect(md).toContain('# Storage choice')
   expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ · Switched storage to SQLite. · +M-001')
@@ -203,7 +203,7 @@ test('a turn below the gate gets a low-effort step line and no note', async ($, 
   await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t2'))
 
   expect(files.get(STEPS) ?? '').toContain('- t2 · ✓ · Ran the tests; all pass.')
-  expect(files.get(STATE) ?? '').toContain('## Open asks\n_None._')
+  expect(files.get(STATE) ?? '').toContain('## Topic index\n_None._')
   expect(files.get(EVENTS) ?? '').toContain('"action":"skip"')
   expect(calls.efforts).toEqual(['high', 'low'])
 })
@@ -333,7 +333,7 @@ test('an old notes file seeds the new folder once and is left as it was', async 
 
   const md = files.get(`${ROOT}/demo/2026-10-17_abc12345/state.md`) ?? ''
   expect(md).toContain('# Video work')
-  expect(md).toContain('### M-002 · requirement · t2\nKeep answers short.')
+  expect(md).toContain('- M-002 · requirement · Keep answers short.')
   expect(md.includes('Use Postgres')).toBe(false)
   expect(files.get(OLD)).toBe(old)
 })
@@ -419,7 +419,7 @@ test('what the user picks in the agent\'s questions counts as their words', asyn
   await $.turn.complete({ turnId: 't1', answer: 'Using SQLite.', durationMs: 10, isAborted: false } as never)
   await settle(clock, files, f => f.has(STEPS))
 
-  expect(files.get(STATE) ?? '').toContain('Quote: "SQLite, the file one"')
+  expect(files.get(STATE) ?? '').toContain('"SQLite, the file one" (t1)')
   expect(files.get(EVENTS) ?? '').toContain('Which store? → SQLite, the file one')
 })
 
@@ -642,8 +642,9 @@ for (const ms of [2000, 5000]) {
     await $.prompt.submit({ text: 'what next?' } as never)
     await clock.advance(30000)
 
-    const decisions = (files.get(`${CHILD_DIR}/state.md`) ?? '').split('\n').filter(l => l.startsWith('### M-'))
-    expect(decisions).toEqual(['### M-001 · decision · t2'])
+    const decisions = (files.get(`${CHILD_DIR}/state.md`) ?? '').split('\n').filter(l => l.startsWith('- M-'))
+    expect(decisions).toHaveLength(1)
+    expect(decisions[0]).toContain('- M-001 · decision ·')
     expect(turnsOf(files.get(`${CHILD_DIR}/steps.md`))).toEqual(['- t1', '- t2'])
     expect((files.get(`${CHILD_DIR}/events.jsonl`) ?? '').split('\n').filter(l => l.includes('"type":"extract"') && l.includes('"turn":2'))).toHaveLength(1)
     expect(calls.haiku).toBeGreaterThanOrEqual(2)
@@ -1553,7 +1554,7 @@ test('retry runs a failed turn again and rewrites its step line with what it fou
 
   const lines = (files.get(STEPS) ?? '').split('\n').filter(l => l.startsWith('- t'))
   expect(lines).toEqual(['- t1 · ✓ · Switched storage to SQLite. · +M-001'])
-  expect(files.get(STATE) ?? '').toContain('### M-001 · decision · t1')
+  expect(files.get(STATE) ?? '').toContain('- M-001 · decision ·')
   expect(calls.haiku).toBe(3)
 })
 
@@ -1597,7 +1598,7 @@ test('a failing write of events.jsonl does not stop the state and the step line'
   await say($, 'Please use SQLite from now on.', 'Switched.', 1)
   await settle(clock, files, f => f.has(STEPS))
 
-  expect(files.get(STATE) ?? '').toContain('### M-001 · decision · t1')
+  expect(files.get(STATE) ?? '').toContain('- M-001 · decision ·')
   expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ · Switched storage to SQLite. · +M-001')
 })
 
