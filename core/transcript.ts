@@ -6,8 +6,22 @@ import type { Turn } from './types'
 type Line = Record<string, unknown>
 type ToolUse = { name: string; input: Record<string, unknown> }
 
-// Messages Claude Code or a plugin wrote into the user's slot.
-const AUTOMATED = /^(<command-name>|<local-command-|<system-reminder>|Caveat:|\[Request interrupted|This session is being continued|<task-notification>|<bash-)/
+// Messages Claude Code, the app or a plugin wrote into the user's slot: commands, app events such as another
+// session finishing a turn or a CI result, and task notifications. They arrive with no origin, like typed text.
+const AUTOMATED =
+  /^(<command-name>|<local-command-|Caveat:|\[Request interrupted|This session is being continued|<task-notification>|<bash-|<side-sessions-event>|<ci-monitor-event>)/
+const REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g
+// A message another Claude session sent: it can carry the person's instructions, but it is not their words.
+const FROM_SESSION = /^<cross-session-message\b[^>]*?\bname="([^"]*)"/
+
+// The text the person or a session wrote, without the reminders the app adds around it.
+export const withoutReminders = (text: string): string => text.replace(REMINDER, '').trim()
+
+// Not something the person or another session said: it makes no turn.
+export const isAutomated = (text: string): boolean => AUTOMATED.test(withoutReminders(text))
+
+// The name of the session that sent this message, or undefined when the person typed it.
+export const viaOf = (text: string): string | undefined => FROM_SESSION.exec(withoutReminders(text))?.[1]
 
 const blocks = (d: Line): Line[] => {
   const content = (d.message as { content?: unknown } | undefined)?.content
@@ -25,8 +39,8 @@ const humanText = (d: Line): string | undefined => {
       : parts.length > 0 && parts.every(b => b.type === 'text' || b.type === 'image')
         ? parts.flatMap(b => (b.type === 'text' ? [String(b.text)] : [])).join('\n')
         : undefined
-  if (text === undefined || text.trim() === '' || AUTOMATED.test(text.trim())) return undefined
-  return text
+  const said = text === undefined ? '' : withoutReminders(text)
+  return said === '' || isAutomated(said) ? undefined : said
 }
 
 const assistantText = (d: Line): string | undefined => {
@@ -100,8 +114,8 @@ export const parseTranscript = (text: string): Turn[] => {
     if (last === undefined || d.isSidechain === true) continue
     // A message typed while the agent was working joins the turn it was typed in.
     const queued = d.type === 'attachment' ? (d.attachment as { type?: string; prompt?: unknown } | undefined) : undefined
-    if (queued?.type === 'queued_command' && typeof queued.prompt === 'string' && !AUTOMATED.test(queued.prompt.trim())) {
-      last.user = `${last.user}\n\n${queued.prompt}`
+    if (queued?.type === 'queued_command' && typeof queued.prompt === 'string' && withoutReminders(queued.prompt) !== '' && !isAutomated(queued.prompt)) {
+      last.user = `${last.user}\n\n${withoutReminders(queued.prompt)}`
       continue
     }
     for (const b of blocks(d)) {

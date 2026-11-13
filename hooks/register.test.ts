@@ -1226,6 +1226,39 @@ test('a prompt the person did not type leaves the digest for the next one they t
   expect(digestOn(calls.contexts)).toContain('The chat was just compacted.')
 })
 
+test('an app event with no origin makes no turn and leaves the digest; a message from another session does both', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, calls } = world(on, 0.1, [])
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, 'fix the parser', 'Fixed.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+  await $.session.compact(COMPACT)
+
+  await say($, '<side-sessions-event>Session docs finished a turn.</side-sessions-event>', 'Noted.', 2)
+  await say($, '<system-reminder>status</system-reminder>\n<ci-monitor-event>CI passed.</ci-monitor-event>', 'Good.', 3)
+  expect(calls.contexts.at(-1) ?? []).toEqual([])
+  await say($, '<cross-session-message from="local_1" name="Lead">Ask Isaac before any paid run.</cross-session-message>', 'Will do.', 4)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t2'))
+
+  expect(digestOn(calls.contexts)).toContain('The chat was just compacted.')
+  expect(turnsOf(files.get(STEPS))).toEqual(['- t1', '- t2'])
+  const events = files.get(EVENTS) ?? ''
+  expect(events.includes('side-sessions-event') || events.includes('ci-monitor-event')).toBe(false)
+  expect(events).toContain('name=\\"Lead\\">Ask Isaac before any paid run.')
+})
+
+test('the reminders the app wraps around a typed message are not part of what the person said', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.1, [])
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await say($, '<system-reminder>Linked sessions now: docs (idle).</system-reminder>\nfix the parser', 'Fixed.', 1)
+  await settle(clock, files, f => f.has(STEPS))
+
+  const events = files.get(EVENTS) ?? ''
+  expect(events).toContain('"user":"fix the parser"')
+  expect(events.includes('Linked sessions')).toBe(false)
+})
+
 test('a typed prompt that something beneath drops does not use up the digest', async ($, on) => {
   const { calls } = await recorded($, on)
   await $.session.compact(COMPACT)

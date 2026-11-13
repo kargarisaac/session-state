@@ -9,7 +9,7 @@ import { activeNotes, newFront, parseOldNotes, pointerText, rulesText, upsertInd
 import { processTurn } from '../core/pipeline'
 import { emptyState, HISTORY_HEAD, historyBlock, learnLabel, noteLabel, parseState, renderState, seedState } from '../core/state'
 import { appendStep, hasStep, lastStep, stepLines } from '../core/steps'
-import { answersOf, continuesFrom, hasMessage, parseTranscript, withAnswers } from '../core/transcript'
+import { answersOf, continuesFrom, hasMessage, isAutomated, parseTranscript, withAnswers, withoutReminders } from '../core/transcript'
 import type { Config, Kind, State, Turn } from '../core/types'
 import type { ExtractEvent, LedgerEvent, PendingTurn, Status, Tab } from '../types'
 import { rows, statusOf } from './format'
@@ -466,11 +466,14 @@ export const register: Register = (on, options) => {
     // schedule, a peer or another plugin.
     const kind = e.origin?.kind
     const isTyped = kind === undefined || kind === 'composer' || kind === 'bridge' || kind === 'sdk'
-    if (!isTyped || e.command !== undefined || e.isMeta === true || e.text.trim() === '' || (await read($, isPaused))) return next(e)
+    // The app's events (another session finished a turn, a CI result) also come with no origin: only their text
+    // tells them apart. They make no turn and never take the digest.
+    const text = withoutReminders(e.text)
+    if (!isTyped || e.command !== undefined || e.isMeta === true || text === '' || isAutomated(text) || (await read($, isPaused))) return next(e)
     let digest = ''
     try {
       await ensure($)
-      await update($, pendingUser, p => (p === '' ? e.text : `${p}\n\n${e.text}`))
+      await update($, pendingUser, p => (p === '' ? text : `${p}\n\n${text}`))
       // Taken before the digest is built: a second prompt that lands while it is being built finds the flag
       // down, so the agent is handed the digest once. If it cannot be built, the next prompt is owed it.
       let isOwed = false
@@ -493,7 +496,7 @@ export const register: Register = (on, options) => {
     if (out.drop !== undefined) {
       // Dropped beneath: the agent never saw it. It is not something the person asked, and the next typed
       // prompt carries the digest.
-      await update($, pendingUser, p => (p === e.text ? '' : p.endsWith(`\n\n${e.text}`) ? p.slice(0, -(e.text.length + 2)) : p)).catch(quiet)
+      await update($, pendingUser, p => (p === text ? '' : p.endsWith(`\n\n${text}`) ? p.slice(0, -(text.length + 2)) : p)).catch(quiet)
       if (digest !== '') await update($, isCompacted, () => true).catch(quiet)
     }
     return out

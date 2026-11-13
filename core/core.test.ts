@@ -13,7 +13,7 @@ import type { Ledger } from './pipeline'
 import { clip, redact } from './redact'
 import { applyFileRoles, applyLearnings, emptyState, historyBlock, parseState, renderState, seedState } from './state'
 import { appendStep, stepLine, stepLines } from './steps'
-import { parseTranscript } from './transcript'
+import { isAutomated, parseTranscript, viaOf } from './transcript'
 import { DEFAULTS } from './types'
 import type { CompleteResult, Config, Host, Memory, State, Turn, TurnFacts } from './types'
 
@@ -636,4 +636,17 @@ test('a transcript reads back as typed turns with the last reply, tool facts and
   expect(first!.user).toBe("Use SQLite.\n\n[Answers to the agent's questions]\n- Which file? → db.ts\n\nand keep it local")
   expect(first!.facts.edited).toEqual(['/work/demo/db.ts'])
   expect(second).toMatchObject({ turn: 2, turnId: 'u2', user: 'what is this?', answer: '', previousAnswer: 'Switched to SQLite.' })
+})
+
+test('a transcript drops app events and reminders, and keeps messages from other sessions with their sender', () => {
+  const text = [
+    line({ type: 'user', uuid: 'u1', message: { content: '<system-reminder>Linked sessions now.</system-reminder>\nUse SQLite.' } }),
+    line({ type: 'user', uuid: 'u2', message: { content: '<side-sessions-event>docs finished a turn</side-sessions-event>' } }),
+    line({ type: 'user', uuid: 'u3', message: { content: '<cross-session-message from="local_1" name="Lead">Ask before paid runs.</cross-session-message>' } }),
+  ].join('\n')
+  const turns = parseTranscript(text)
+  expect(turns.map(t => t.user)).toEqual(['Use SQLite.', '<cross-session-message from="local_1" name="Lead">Ask before paid runs.</cross-session-message>'])
+  expect(viaOf(turns[1]!.user)).toBe('Lead')
+  expect(viaOf(turns[0]!.user)).toBeUndefined()
+  expect(isAutomated('<system-reminder>x</system-reminder>\n<ci-monitor-event>CI passed</ci-monitor-event>')).toBe(true)
 })
