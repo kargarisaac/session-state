@@ -172,7 +172,7 @@ test('compaction saves consolidation history, event and standing rules', async (
   await settle(clock, files, f => (f.get(EVENTS) ?? '').includes('"type":"consolidate"'))
 
   expect(calls.haiku).toBe(1)
-  expect(calls.efforts).toEqual(['high'])
+  expect(calls.efforts).toEqual(['medium'])
   expect(files.get(STATE) ?? '').toContain('## Work')
   expect(files.get(STATE) ?? '').not.toContain('M-003')
   expect(files.get(`${FOLDER}/history.md`) ?? '').toContain('merged')
@@ -226,7 +226,7 @@ test('a decision above the gate lands in the session folder: state, step, archiv
   expect(events).toContain('"action":"always"')
   expect(calls.jev).toBe(0)
   expect(calls.haiku).toBe(1)
-  expect(calls.efforts).toEqual(['high'])
+  expect(calls.efforts).toEqual(['medium'])
 
   const ui = await mountPane($)
   expect(await textOf(ui)).toContain('Switched storage to SQLite.')
@@ -242,7 +242,7 @@ test('a decision above the gate lands in the session folder: state, step, archiv
   expect(stats).toContain('jev-1.14')
 })
 
-test('a turn below the gate gets a low-effort step line and no note', async ($, on) => {
+test('a trivial turn below the gate gets its step line from code, with no Haiku call and no note', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   const { files, calls } = world(on, 0.1, [
     { step: { text: 'Read the repo.', outcome: 'ok' }, memories: [] },
@@ -255,10 +255,11 @@ test('a turn below the gate gets a low-effort step line and no note', async ($, 
   await say($, 'run the tests', 'All pass.', 2)
   await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t2'))
 
-  expect(files.get(STEPS) ?? '').toContain('- t2 · ✓ · Ran the tests; all pass.')
+  // A turn below the gate with no tool use and a short reply gets its step line from code, with no Haiku call.
+  expect(files.get(STEPS) ?? '').toContain('- t2 · ✓ · Asked: run the tests')
   expect(files.get(STATE) ?? '').toContain('## Topic index\n_None._')
   expect(files.get(EVENTS) ?? '').toContain('"action":"skip"')
-  expect(calls.efforts).toEqual(['high', 'low'])
+  expect(calls.efforts).toEqual(['medium'])
 })
 
 test('the main agent\'s tool calls become the turn facts; a subagent\'s do not', async ($, on) => {
@@ -425,7 +426,7 @@ test('boot skips the transcript when the ledger has events', async ($, on) => {
 
 test('a chat met mid-way is read back from its transcript, so steps and turn numbers start at the beginning', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
-  const { files, calls } = world(on, 0.1, [
+  const { files, calls } = world(on, 0.95, [
     { title: 'Storage', step: { text: 'Chose SQLite.', outcome: 'ok' }, memories: [] },
     { step: { text: 'Ran the tests.', outcome: 'ok' }, memories: [] },
     { step: { text: 'Wrote the docs.', outcome: 'ok' }, memories: [] },
@@ -489,7 +490,7 @@ test('what the user picks in the agent\'s questions counts as their words', asyn
 
 test('rebuild sets the current files aside and reads the whole chat back from the transcript', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
-  const { files } = world(on, 0.1, [
+  const { files } = world(on, 0.95, [
     { step: { text: 'Live turn seen late.', outcome: 'ok' }, memories: [] },
     { step: { text: 'Chose SQLite.', outcome: 'ok' }, memories: [] },
     { step: { text: 'Ran the tests.', outcome: 'ok' }, memories: [] },
@@ -651,7 +652,7 @@ test('a parent that started long before the newest twelve folders is found by wh
 
 test('a live turn is numbered after the copied steps when the parent kept no events', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
-  const { files } = world(on, 0.1, [{ step: { text: 'Added the tests.', outcome: 'ok' }, memories: [] }])
+  const { files } = world(on, 0.95, [{ step: { text: 'Added the tests.', outcome: 'ok' }, memories: [] }])
   files.set(`${OLD_DIR}/state.md`, ledgerOf('old00001-0000', 'Use SQLite for storage.'))
   files.set(`${OLD_DIR}/steps.md`, '# Steps\n- t1 · ✓ · Chose SQLite.\n- t2 · ✓ · Ran the tests.\n- t3 · ✓ · Fixed the parser.\n')
   files.set(`${PROJECT}/old00001-0000.jsonl`, last('last-of-old'))
@@ -667,7 +668,7 @@ test('a live turn is numbered after the copied steps when the parent kept no eve
 
 test('turns the new session already ran are numbered after the copied steps', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
-  const { files } = world(on, 0.1, [
+  const { files } = world(on, 0.95, [
     { step: { text: 'Wrote the docs.', outcome: 'ok' }, memories: [] },
     { step: { text: 'Added the tests.', outcome: 'ok' }, memories: [] },
   ])
@@ -1149,7 +1150,7 @@ test('a turn that Haiku failed twice shows in the panel, and retry records its n
 
 test('after a rebuild the open panel shows the rebuilt steps and ledger, not the old ones', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
-  const { files } = world(on, 0.1, [SQLITE, { step: { text: 'Picked a store.', outcome: 'ok' }, memories: [] }, { step: { text: 'Ran the tests.', outcome: 'ok' }, memories: [] }])
+  const { files } = world(on, 0.95, [SQLITE, { step: { text: 'Picked a store.', outcome: 'ok' }, memories: [] }, { step: { text: 'Ran the tests.', outcome: 'ok' }, memories: [] }])
   await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
   await say($, 'Please use SQLite from now on.', 'Switched.', 1)
   await settle(clock, files, f => f.has(STEPS))
@@ -1647,7 +1648,7 @@ const archived = (turn: number, user: string, answer: string) =>
 
 test('a long chat whose archive reaches 4 MiB still gets its state and steps written', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
-  const { files } = world(on, 0.1, [])
+  const { files } = world(on, 0.95, [])
   // An events.jsonl of about 1000 archived turns, a hair under the 4 MiB the engine lets a file or a state value hold.
   const rows: string[] = []
   let size = 0
@@ -1710,7 +1711,7 @@ const END = { reason: 'other', sessionId: ID, resume: { id: ID } } as never
 
 test('two drains started at once record each queued turn once', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
-  const { files, calls } = world(on, 0.1, [])
+  const { files, calls } = world(on, 0.95, [])
 
   await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
   await say($, 'first thing', 'Done.', 1)
