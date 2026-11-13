@@ -324,7 +324,7 @@ const handle = async ($: EngineInterface, config: Config, turn: PendingTurn, fol
   const outcome = await processTurn(
     hostOf($, config),
     config,
-    { state, steps: stepLines(stepsMd), archive: archivedTurns(ledger), files: ranked(state, ledger, turn.turn) },
+    { state, steps: stepLines(stepsMd), archive: archivedTurns(ledger), files: ranked(state, ledger, turn.turn), events: ledger },
     turn,
   )
   if (!(await isHere($, folder))) return false

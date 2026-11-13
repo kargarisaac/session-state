@@ -82,7 +82,7 @@ const replay = async (s: EvalSession, cwd: string, out: string) => {
     const turn = { turn: t.n, turnId: `${s.id}:${t.n}`, user: t.user, answer: t.answer, previousAnswer: t.previousAnswer, isAborted: false, facts: t.facts! }
     events = [...events, turnRecord(turn, Date.now())]
     const files = rankFiles(fileIndex(archivedTurns(events)), state, t.n)
-    const outcome = await processTurn(host, config, { state, steps: stepLines(steps), archive: archivedTurns(events), files }, turn)
+    const outcome = await processTurn(host, config, { state, steps: stepLines(steps), archive: archivedTurns(events), files, events }, turn)
     events = [...events, ...outcome.events]
     state = outcome.state
     steps = appendStep(steps, outcome.step)
