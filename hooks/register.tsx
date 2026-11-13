@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, Register, ThemeKey } from 'claude-code'
 
 import { digestText } from '../core/digest'
+import { consolidate, standingRules } from '../core/consolidate'
 import { addToolCall, emptyFacts } from '../core/facts'
 import { fileIndex, rankFiles } from '../core/files'
 import { archivedTurns, fitLedger, parseLedger, parsePending, recentTopics, serializeLedger, serializePending, summarize, turnRecord } from '../core/ledger'
@@ -41,6 +42,7 @@ const steps = atom({ plugin: 'session-state', key: 'steps' } as const, '')
 const history = atom({ plugin: 'session-state', key: 'history' } as const, '')
 const events = atom({ plugin: 'session-state', key: 'events' } as const, [] as LedgerEvent[])
 const queue = atom({ plugin: 'session-state', key: 'queue' } as const, [] as PendingTurn[])
+const consolidations = atom({ plugin: 'session-state', key: 'consolidations' } as const, [] as { folder: string; turn: number }[])
 const failed = atom({ plugin: 'session-state', key: 'failed' } as const, [] as PendingTurn[])
 const pendingUser = atom({ plugin: 'session-state', key: 'pendingUser' } as const, '')
 const previousAnswer = atom({ plugin: 'session-state', key: 'previousAnswer' } as const, '')
@@ -103,7 +105,8 @@ const loadState = (text: string, front: Record<string, string>): State => {
   return { ...parsed, front: { ...front, ...parsed.front } }
 }
 
-const LEDGER_FILES = [stateOf, stepsOf, historyOf, eventsOf, pendingOf]
+const suggestionsOf = (folder: string) => `${folder}/suggestions.md`
+const LEDGER_FILES = [stateOf, stepsOf, historyOf, eventsOf, pendingOf, suggestionsOf]
 const MAX_PARENTS = 12
 
 // The transcript a ledger folder names in its state.md.
@@ -202,6 +205,7 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   await update($, dir, () => folder)
   await update($, origin, () => cwd)
   const isContinued = found === undefined && (await inherit($, here, folder, home, id, transcript, previous))
+  if (before.dir !== folder) await update($, consolidations, list => isContinued ? list.map(job => job.folder === before.dir ? { ...job, folder } : job) : list.filter(job => job.folder !== before.dir))
 
   let ledger = parseLedger(await readText($, eventsOf(folder)))
   let pending = parsePending(await readText($, pendingOf(folder)))
@@ -351,6 +355,33 @@ const handle = async ($: EngineInterface, config: Config, turn: PendingTurn, fol
   return isHere($, folder)
 }
 
+const compactLedger = async ($: EngineInterface, config: Config, folder: string, turn: number): Promise<boolean> => {
+  const state = loadState(await readText($, stateOf(folder)), await frontOf($))
+  const ledger = await read($, events)
+  const since = ledger.filter(e => e.type === 'consolidate' && e.error === undefined).at(-1)?.turn ?? 0
+  const outcome = await consolidate(hostOf($, config), state, await readText($, stepsOf(folder)), archivedTurns(ledger).filter(t => t.turn <= turn), since, turn, ranked(state, ledger, turn))
+  if (!(await isHere($, folder))) return false
+  if (outcome.error === undefined) {
+    const peers = await listOf($, dirOf(folder))
+    const others = await Promise.all(peers.filter(e => e.kind === 'dir' && `${dirOf(folder)}/${e.name}` !== folder).map(async e => parseState(await readText($, stateOf(`${dirOf(folder)}/${e.name}`)))))
+    const suggestions = standingRules(outcome.state, others).map(n => `- ${n.text}`).join('\n')
+    if (outcome.moved.length > 0) {
+      const before = await readText($, historyOf(folder))
+      const nextHistory = `${before === '' ? HISTORY_HEAD : before}\n${outcome.moved.map(historyBlock).join('\n\n')}\n`
+      await $.fs.write(historyOf(folder), nextHistory)
+      await update($, history, () => nextHistory)
+    }
+    const out = renderState(outcome.state, ranked(outcome.state, ledger, turn))
+    await $.fs.write(stateOf(folder), out)
+    await update($, md, () => out)
+    await $.fs.write(suggestionsOf(folder), suggestions === '' ? '' : `${suggestions}\n`)
+  }
+  const count = (reason: string) => outcome.moved.filter(m => m.reason === reason).length
+  await saveEvents($, [{ type: 'consolidate', at: await $.clock.now(), turn, merged: count('merged'), superseded: count('superseded'), done: count('done'), dropped: count('dropped'), topics: Object.keys(outcome.state.topics).length, usage: outcome.usage, ...(outcome.error === undefined ? {} : { error: outcome.error }) }])
+  if (outcome.error !== undefined) await update($, status, s => ({ ...s, message: `error: ${outcome.error!.slice(0, 140)}` }))
+  return true
+}
+
 // Runs outside any hook's budget, one turn at a time, so the next prompt is never held up.
 const drain = async ($: EngineInterface, config: Config): Promise<void> => {
   // The loop is claimed in one step on the busy flag itself: of two wake-ups at once, one gets it, so a turn is
@@ -368,6 +399,17 @@ const drain = async ($: EngineInterface, config: Config): Promise<void> => {
       await booting?.run.catch(quiet)
       const folder = await read($, dir)
       const next = (await read($, queue))[0]
+      const job = (await read($, consolidations))[0]
+      if (job !== undefined && (next === undefined || next.turn > job.turn)) {
+        let isDone = true
+        try {
+          if (job.folder === folder) isDone = await compactLedger($, config, folder, job.turn)
+        } catch (err) {
+          await update($, status, s => ({ ...s, message: `error: ${String(err).slice(0, 140)}` }))
+        }
+        if (isDone) await update($, consolidations, list => list[0]?.folder === job.folder && list[0]?.turn === job.turn ? list.slice(1) : list)
+        continue
+      }
       if (next === undefined) break
       await update($, status, s => ({ ...s, turn: next.turn }))
       let isDone = true
@@ -387,6 +429,9 @@ const drain = async ($: EngineInterface, config: Config): Promise<void> => {
     }
   } finally {
     await update($, status, s => ({ ...s, isBusy: false }))
+    if ((await read($, queue)).length > 0 || (await read($, consolidations)).length > 0) {
+      void $.clock.after(0, async () => { await drain($, config).catch(quiet) })
+    }
   }
 }
 
@@ -396,7 +441,7 @@ const flush = async ($: EngineInterface, options: PluginOptions): Promise<void> 
   const deadline = (await $.clock.now()) + 8000
   while ((await $.clock.now()) < deadline) {
     const isBusy = (await read($, status)).isBusy
-    if (!isBusy && (await read($, queue)).length === 0) return
+    if (!isBusy && (await read($, queue)).length === 0 && (await read($, consolidations)).length === 0) return
     if (isBusy) await $.clock.sleep(150)
     else await drain($, config)
   }
@@ -572,6 +617,9 @@ export const register: Register = (on, options) => {
       try {
         if ((await read($, dir)) === '') await ensure($)
         await saveEvents($, [{ type: 'compaction', at: await $.clock.now(), turn: await read($, turns) }])
+        const job = { folder: await read($, dir), turn: await read($, turns) }
+        await update($, consolidations, list => [...list, job])
+        kick($, options)
       } catch {
         // Bookkeeping must not fail the compaction.
       }
@@ -833,6 +881,7 @@ export const register: Register = (on, options) => {
       const asks = active.filter(n => n.kind === 'ask')
       const rules = active.filter(n => n.kind !== 'ask')
       const roles = Object.entries(state.roles)
+      const suggestions = (await readText($, suggestionsOf(folder))).split('\n').filter(line => line.startsWith('- ')).map(line => line.slice(2))
       const wide = Math.max(20, columns - 4)
       // One entry: its id and kind on a line, then what it says, why, and the user's own words.
       const entry = (id: string, kind: string, tone: ThemeKey, turn: number, text: string, why: string, quote: string) => (
@@ -860,6 +909,8 @@ export const register: Register = (on, options) => {
           {asks.map(n => entry(noteLabel(n.id), 'ask', KIND_TONE.ask, n.turn, n.text, n.why, n.quote === '' ? '' : `“${n.quote.replace(/^"|"$/g, '')}”`))}
           {rules.length > 0 && heading('Decisions and rules', rules.length)}
           {rules.map(n => entry(noteLabel(n.id), n.kind, KIND_TONE[n.kind], n.turn, n.text, n.why, n.quote === '' ? '' : `“${n.quote.replace(/^"|"$/g, '')}”`))}
+          {suggestions.length > 0 && heading('Suggested for AGENTS.md', suggestions.length)}
+          {suggestions.map((text, i) => <Text key={i}>{text}</Text>)}
           {learnings.length > 0 && heading('Learned the hard way', learnings.length)}
           {learnings.map(l => entry(learnLabel(l.id), l.kind, l.kind === 'failed' ? 'error' : 'warning', l.turn, l.text, l.why, l.evidence))}
           {roles.length > 0 && heading('Files', roles.length)}

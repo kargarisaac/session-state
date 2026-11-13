@@ -47,6 +47,7 @@ const world = (
   // `hang.jev` makes OpenRouter take the request and never answer it.
   const hang = { jev: false }
   const calls = { jev: 0, haiku: 0, efforts: [] as string[], contexts: [] as (readonly string[] | undefined)[], isDropping: false }
+  let replyIndex = 0
   // A read of a path waits for its hold and then answers what the file held when it was asked; Haiku waits for its
   // hold, and fails its next `fails` calls.
   const holds = { reads: new Map<string, Promise<void>>(), haiku: undefined as Promise<void> | undefined, fails: 0 }
@@ -116,7 +117,9 @@ const world = (
       holds.fails -= 1
       return { value: { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: USAGE } } as never
     }
-    const next = replies[calls.haiku++] ?? { step: { text: 'Answered.', outcome: 'ok' }, memories: [] }
+    calls.haiku += 1
+    const isPass = String((e as { system?: string }).system).startsWith('Consolidate the session ledger.')
+    const next = isPass ? (replies.find(reply => 'merges' in reply) ?? {}) : (replies.filter(reply => !('merges' in reply))[replyIndex++] ?? { step: { text: 'Answered.', outcome: 'ok' }, memories: [] })
     const wait = stall.until
     stall.until = undefined
     if (wait !== undefined) await wait
@@ -152,6 +155,55 @@ const SQLITE = {
   step: { text: 'Switched storage to SQLite.', outcome: 'ok' },
   memories: [{ kind: 'decision', text: 'Use SQLite for storage.', why: 'No server to run.', context: '', quote: 'use SQLite', refers_to: [], supersedes: [] }],
 }
+
+test('compaction saves consolidation history, event and standing rules', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const reply = { merges: [{ keep: 1, drop: [2] }], replaces: [], done: [3], dropped: [], topics: [{ name: 'Work', summary: 'Project rules.' }], assign: [{ id: 1, topic: 'Work' }] }
+  const { files, calls } = world(on, 0.95, [reply])
+  const rule = 'Never merge pull requests without user approval.'
+  const note = (id: number, kind: string, text: string) => `### M-00${id} · ${kind} · t1\n${text}\nQuote: "${text}"\n`
+  files.set(STATE, `## Decisions and rules\n${note(1, 'requirement', rule)}${note(2, 'requirement', rule)}\n## Open asks\n${note(3, 'ask', 'Run the checks.')}\n`)
+  files.set(`${ROOT}/demo/2026-10-16_other/state.md`, `## Decisions and rules\n${note(1, 'requirement', rule)}\n`)
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await $.session.compact({ agentId: 'sub1' } as never)
+  await $.session.compact({ trigger: 'precompute' } as never)
+  await $.session.compact(COMPACT)
+  await settle(clock, files, f => (f.get(EVENTS) ?? '').includes('"type":"consolidate"'))
+
+  expect(calls.haiku).toBe(1)
+  expect(calls.efforts).toEqual(['high'])
+  expect(files.get(STATE) ?? '').toContain('## Work')
+  expect(files.get(STATE) ?? '').not.toContain('M-003')
+  expect(files.get(`${FOLDER}/history.md`) ?? '').toContain('merged')
+  expect(files.get(`${FOLDER}/history.md`) ?? '').toContain('done')
+  const event = (files.get(EVENTS) ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line)).find(e => e.type === 'consolidate')
+  expect(event).toMatchObject({ merged: 1, done: 1, topics: 1, usage: { input: 900 } })
+  expect(files.get(`${FOLDER}/suggestions.md`)).toBe(`- ${rule}\n`)
+  const ui = await mountPane($)
+  await $.command.run({ command: 'session-state', args: 'ledger' } as never)
+  await ui.redraw()
+  const panel = await bodyOf(ui)
+  expect(panel).toContain('SUGGESTED FOR AGENTS.MD')
+  expect(panel).toContain(rule)
+})
+
+test('a turn waits for a compaction pass before it writes the ledger', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const reply = { merges: [], replaces: [], done: [], dropped: [], topics: [], assign: [] }
+  const { files, calls, stall } = world(on, 0.95, [reply, SQLITE])
+  let release = () => {}
+  stall.until = new Promise<void>(resolve => { release = resolve })
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await $.session.compact(COMPACT)
+  await clock.advance(10)
+  await say($, 'Please use SQLite from now on.', 'Switched.', 1)
+  expect(calls.haiku).toBe(1)
+  release()
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('t1'))
+  expect(calls.haiku).toBe(2)
+  expect(files.get(STATE) ?? '').toContain('Use SQLite for storage.')
+  expect(files.get(EVENTS) ?? '').toContain('"type":"consolidate"')
+})
 
 test('a decision above the gate lands in the session folder: state, step, archive and index', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
