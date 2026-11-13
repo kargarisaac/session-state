@@ -129,6 +129,16 @@ For extraction Haiku sees the Now block, the topic index, the sections of the to
 
 **The ledger.** [eval/PROBES.md](eval/PROBES.md) replays real chats through the mod, then asks questions an agent must still answer after a compaction (what you asked, which file, what was decided, what is still open) and grades the answers 0 to 5 with only a compaction-style summary, only the ledger, or both. On two held-out chats (75 turns, 24 questions), summary and ledger together scored 3.54 against 2.83 for the summary alone. The ledger is strongest on what you asked (3.67 alone against 2.17 for the summary) and weakest on what was pending at the very end, which the summary covers. Both miss the agent's own reasons for its choices, which the ledger does not record. The sample is small and Sonnet wrote and graded the questions.
 
+**0.6 against 0.4.** The probe now also grades an "after" condition: the summary plus exactly what the mod injects (system-prompt sections and the digest), which is what the agent has after a compaction if it reads no file. On four chats (48 questions, the same questions, summaries and chat text in every run):
+
+| Run | Summary | Ledger | Both | After |
+| --- | --- | --- | --- | --- |
+| 0.4 ([baseline](eval/PROBES-baseline.md)) | 2.96 | 2.15 | 3.69 | 3.19 |
+| Phase 2 fixes ([report](eval/PROBES-fixes.md)) | 3.10 | 2.27 | 3.40 | 3.19 |
+| 0.6 topics ([report](eval/PROBES-topics.md)) | 3.08 | 2.25 | 3.48 | 3.15 |
+
+The "after" score did not change. The summary column gets the identical input in every run and still moves by 0.14, so differences under about 0.15 are grader noise. 0.6 is not better at answering these questions; what it changes is what goes in the ledger (only the person's and other sessions' words, failures marked, newest first in the digest, notes grouped by topic and merged at compaction) and what it costs. With the gate off, 0.6 made 591 Haiku calls for 587 turns: about 17,600 input and 2,150 output tokens a turn. With the gate on, turns below the threshold with no edits or failures get their step from code and no Haiku call.
+
 ## Development
 
 `core/` is host-free logic, `hooks/` the Claude Code adapter, `eval/` the calibration and the probe test. Check with `claude plugin validate .` and `claude plugin test .`. To rerun the calibration on your own chats: `bun eval/build.ts`, `label.ts`, `score.ts`, `fit.ts` (set `EVAL_PROJECT_PREFIX` to pick project folders under `~/.claude/projects`; data stays in git-ignored `eval/data/`). The probe test: `bun eval/probe.ts <transcript.jsonl>...`.
