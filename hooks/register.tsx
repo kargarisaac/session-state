@@ -527,7 +527,9 @@ export const register: Register = (on, options) => {
         const names = ['state.md', 'steps.md', 'history.md', 'events.jsonl']
         const file = e.tool === 'Read'
           ? names.find(name => path === `${folder}/${name}`)
-          : (names.find(name => text.includes(`${folder}/${name}`)) ?? (text.includes(folder) ? baseOf(folder) : undefined))
+          : (names.find(name => text.includes(`${folder}/${name}`)) ??
+            // The folder itself, not a sibling such as `<folder>-other`.
+            (new RegExp(`${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-])`).test(text) ? baseOf(folder) : undefined))
         if (file !== undefined) await saveEvents($, [{ type: 'read', at: await $.clock.now(), turn: (await read($, turns)) + 1, tool: e.tool, file }])
       } catch {
         // Bookkeeping must not fail the tool call.
