@@ -17,6 +17,7 @@ import { fileIndex, rankFiles } from '../core/files'
 import { factsText } from '../core/facts'
 import { archivedTurns, turnRecord } from '../core/ledger'
 import { newFront, pointerText, systemTexts } from '../core/notes'
+import { consolidate } from '../core/consolidate'
 import { processTurn } from '../core/pipeline'
 import { emptyState, HISTORY_HEAD, historyBlock, renderState } from '../core/state'
 import { appendStep, stepLines } from '../core/steps'
@@ -90,6 +91,13 @@ const replay = async (s: EvalSession, cwd: string, out: string) => {
     const gate = outcome.events[0]
     const extract = outcome.events[1]
     console.log(`  ${tag} t${t.n} ${gate?.type === 'gate' ? `p=${gate.p} ${gate.action}` : ''} ${extract?.type === 'extract' ? `${extract.mode} +${extract.kept} notes +${extract.learned} learned${extract.error === undefined ? '' : ` ERROR ${extract.error}`}` : ''}`)
+  }
+  // The compaction at the end runs the consolidation pass, as the hook does.
+  const pass = await consolidate(host, state, steps, archivedTurns(events), 0, s.turns.length, rankFiles(fileIndex(archivedTurns(events)), state, s.turns.length))
+  console.log(`  ${tag} consolidate ${pass.error ?? `${pass.moved.length} moved, ${pass.skipped} skipped, ${Object.keys(pass.state.topics).length} topics`}`)
+  if (pass.error === undefined) {
+    state = pass.state
+    if (pass.moved.length > 0) history = `${history === '' ? HISTORY_HEAD : history}\n${pass.moved.map(historyBlock).join('\n\n')}\n`
   }
   const md = renderState(state, rankFiles(fileIndex(archivedTurns(events)), state, s.turns.length))
   writeFileSync(join(out, 'state.md'), md)
