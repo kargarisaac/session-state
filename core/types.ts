@@ -127,7 +127,7 @@ export const DEFAULTS: Config = {
   jevModel: 'jev-1.14',
   jevKey: '',
   haikuModel: 'claude-haiku-5-5',
-  effort: 'high',
+  effort: 'medium',
   maxWords: 15,
   auditRate: 0,
   pinRules: true,
@@ -144,7 +144,7 @@ export type PostResult = { status: number; text: string }
 export type Host = {
   now: () => Promise<number>
   random: () => number
-  complete: (req: { system: string; prompt: string; effort?: Config['effort'] }) => Promise<CompleteResult>
+  complete: (req: { system: string; prompt: string; effort?: Config['effort']; maxTokens?: number }) => Promise<CompleteResult>
   post: (url: string, headers: Record<string, string>, body: string) => Promise<PostResult>
 }
 
@@ -170,6 +170,7 @@ export type ExtractEvent = {
   turnId: string
   model: string
   mode: 'summarize' | 'extract'
+  calls: number
   ms: number
   usage: Usage
   kept: number

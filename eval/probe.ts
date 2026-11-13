@@ -15,7 +15,7 @@ import { join } from 'node:path'
 import { digestText } from '../core/digest'
 import { fileIndex, rankFiles } from '../core/files'
 import { factsText } from '../core/facts'
-import { archivedTurns, turnRecord } from '../core/ledger'
+import { addUsage, archivedTurns, turnRecord } from '../core/ledger'
 import { newFront, pointerText, systemTexts } from '../core/notes'
 import { consolidate } from '../core/consolidate'
 import { processTurn } from '../core/pipeline'
@@ -47,21 +47,24 @@ const ZERO = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
 // With no key the gate is off and Haiku extracts every turn, so runs without a key compare only with each other.
 const config: Config = { ...DEFAULTS, jevKey: KEY, gate: KEY === '' ? 'off' : 'jev' }
 
-const host: Host = {
+const hostOf = (totals: { calls: number; ms: number; usage: typeof ZERO }): Host => ({
   now: async () => Date.now(),
   random: () => 1,
   complete: async ({ system, prompt, effort }) => {
+    totals.calls++
+    let usage = ZERO
     try {
-      return { isOk: true, text: await ask('haiku', system, prompt, effort ?? config.effort), usage: ZERO }
+      const text = await ask('haiku', system, prompt, effort ?? config.effort, (got, ms) => { usage = got; totals.usage = addUsage(totals.usage, got); totals.ms += ms })
+      return { isOk: true, text, usage }
     } catch (err) {
-      return { isOk: false, reason: String(err).slice(0, 200), usage: ZERO }
+      return { isOk: false, reason: String(err).slice(0, 200), usage }
     }
   },
   post: async (url, headers, body) => {
     const res = await fetch(url, { method: 'POST', headers, body })
     return { status: res.status, text: await res.text() }
   },
-}
+})
 
 // The chat as text: every user message, the agent's reply and what its tools did.
 const transcriptText = (s: EvalSession, cwd: string): string => {
@@ -75,6 +78,8 @@ const transcriptText = (s: EvalSession, cwd: string): string => {
 
 const replay = async (s: EvalSession, cwd: string, out: string) => {
   const tag = s.id.slice(0, 8)
+  const totals = { calls: 0, ms: 0, usage: { ...ZERO } }
+  const host = hostOf(totals)
   let state: State = emptyState(newFront({ sessionId: s.id, project: s.project, cwd, started: '', transcript: '' }))
   let steps = ''
   let history = ''
@@ -109,7 +114,7 @@ const replay = async (s: EvalSession, cwd: string, out: string) => {
   const files = rankFiles(fileIndex(archivedTurns(events)), state, s.turns.length)
   const injected = [pointerText(dir), ...systemTexts(state), digestText(state, stepLines(steps), files, dir, undefined, [], events)].filter(x => x !== '').join('\n\n')
   writeFileSync(join(out, 'injected.md'), injected)
-  return { md, steps, events, injected }
+  return { md, steps, events, injected, totals }
 }
 
 const PROBE_SYSTEM = [
@@ -143,7 +148,7 @@ const material = (c: Condition, summary: string, md: string, steps: string, inje
 type Row = { session: string; type: ProbeType; condition: Condition; score: number; question: string; why: string }
 
 const rows: Row[] = []
-const sizes: { session: string; turns: number; summary: number; ledger: number; notes: number }[] = []
+const sizes: { session: string; turns: number; summary: number; ledger: number; notes: number; calls: number; input: number; output: number; seconds: number }[] = []
 
 await pool(FILES, FILES.length, async file => {
   const id = file.slice(file.lastIndexOf('/') + 1, file.lastIndexOf('/') + 9)
@@ -153,7 +158,7 @@ await pool(FILES, FILES.length, async file => {
   const out = join(DATA, 'probe', id)
   mkdirSync(out, { recursive: true })
   console.log(`${id}: ${session.turns.length} turns, replaying`)
-  const { md, steps, injected } = await replay(session, cwd, out)
+  const { md, steps, injected, totals } = await replay(session, cwd, out)
 
   const chat = transcriptText(session, cwd)
   // The probes and the summary of a chat are written once and reused, so runs on different code answer the same questions.
@@ -165,7 +170,7 @@ await pool(FILES, FILES.length, async file => {
   const probes = (Array.isArray(parsed) ? parsed : parsed.probes).filter(p => (TYPES as readonly string[]).includes(p.type))
   writeFileSync(join(out, 'probes.json'), JSON.stringify(probes, null, 2))
   writeFileSync(join(out, 'summary.md'), summary)
-  sizes.push({ session: id, turns: session.turns.length, summary: summary.length, ledger: md.length + steps.length, notes: (md.match(/^### [ML]-/gm) ?? []).length })
+  sizes.push({ session: id, turns: session.turns.length, summary: summary.length, ledger: md.length + steps.length, notes: (md.match(/^### [ML]-/gm) ?? []).length, calls: totals.calls, input: totals.usage.input + totals.usage.cacheRead + totals.usage.cacheWrite, output: totals.usage.output, seconds: totals.ms / 1000 })
   console.log(`  ${probes.length} probes; answering under ${CONDITIONS.length} conditions`)
 
   const jobs = probes.flatMap(p => CONDITIONS.map(c => ({ p, c })))
@@ -206,10 +211,12 @@ const lines = [
   ...TYPES.map(t => `| ${t} | ${CONDITIONS.map(c => cell(r => r.type === t && r.condition === c)).join(' | ')} |`),
   `| **all** | ${CONDITIONS.map(c => `**${cell(r => r.condition === c)}**`).join(' | ')} |`,
   '',
-  '| Session | Turns | Summary chars | Ledger chars | Notes and learnings |',
-  '| --- | --- | --- | --- | --- |',
-  ...sizes.map(s => `| ${s.session} | ${s.turns} | ${s.summary} | ${s.ledger} | ${s.notes} |`),
+  '| Session | Turns | Summary chars | Ledger chars | Notes and learnings | Haiku calls | Input tokens | Output tokens | Seconds |',
+  '| --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+  ...sizes.map(s => `| ${s.session} | ${s.turns} | ${s.summary} | ${s.ledger} | ${s.notes} | ${s.calls} | ${s.input} | ${s.output} | ${s.seconds.toFixed(1)} |`),
+  `| **Total** | ${sizes.reduce((n, s) => n + s.turns, 0)} | – | – | – | ${sizes.reduce((n, s) => n + s.calls, 0)} | ${sizes.reduce((n, s) => n + s.input, 0)} | ${sizes.reduce((n, s) => n + s.output, 0)} | ${sizes.reduce((n, s) => n + s.seconds, 0).toFixed(1)} |`,
   '',
+  'Haiku input includes cache reads and writes; seconds sum the CLI duration for replay and consolidation calls.',
   'summary: a Sonnet summary of the whole chat, a stand-in for /compact. ledger: state.md and steps.md from the replay.',
   'both: the summary plus state.md and steps.md whole. after: the summary plus exactly what the mod injects (its',
   'system-prompt sections and the digest), which is what the agent has after a compaction if it reads no file.',

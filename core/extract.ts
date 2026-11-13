@@ -146,7 +146,7 @@ export const checkDone = (ids: number[], open: Note[]): number[] => {
   return [...new Set(ids.filter(id => asks.has(id)))]
 }
 
-export type Checked = { kept: Memory[]; overLong: Memory[]; dropped: string[] }
+export type Checked = { kept: Memory[]; dropped: string[] }
 
 // Code, not the model, decides what is saved: the quote must be the user's own words.
 export const checkMemories = (memories: Memory[], user: string, active: Note[], maxWords: number, turn: number): Checked => {
@@ -155,17 +155,16 @@ export const checkMemories = (memories: Memory[], user: string, active: Note[], 
   const activeIds = new Set(active.map(n => n.id))
   const seen = new Set<string>()
   const kept: Memory[] = []
-  const overLong: Memory[] = []
   const dropped: string[] = []
   for (const m of memories) {
     if (m.text === '') dropped.push('empty text')
     else if (!words.some(w => isQuoteOf(m.quote, w))) dropped.push(`quote not in the user message: ${m.text.slice(0, 40)}`)
-    else if (wordCount(m.text) > maxWords) overLong.push(m)
-    else if (seen.has(squash(m.text).toLowerCase())) dropped.push(`duplicate: ${m.text.slice(0, 40)}`)
+    else if (seen.has(squash(clipWords(m.text, maxWords)).toLowerCase())) dropped.push(`duplicate: ${m.text.slice(0, 40)}`)
     else {
-      seen.add(squash(m.text).toLowerCase())
+      seen.add(squash(clipWords(m.text, maxWords)).toLowerCase())
       kept.push({
         ...m,
+        text: clipWords(m.text, maxWords),
         why: clipWords(m.why, WHY_WORDS),
         context: clipWords(m.context, WHY_WORDS),
         refersTo: [...new Set(m.refersTo.filter(t => t > 0 && t < turn))],
@@ -173,7 +172,7 @@ export const checkMemories = (memories: Memory[], user: string, active: Note[], 
       })
     }
   }
-  return { kept, overLong, dropped }
+  return { kept, dropped }
 }
 
 // A learning must cite the agent's reply or a failed command word for word.
