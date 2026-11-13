@@ -34,13 +34,13 @@ export function hostOf($: EngineInterface, config: Config): Host {
   return {
     now: () => $.clock.now(),
     random: () => Math.random(),
-    complete: async ({ system, prompt, effort }) => {
+    complete: async ({ system, prompt, effort, maxTokens }) => {
       const r = await $.model.complete({
         model: config.haikuModel,
         effort: effort ?? config.effort,
         system,
         prompt,
-        maxTokens: 4000,
+        maxTokens: maxTokens ?? 4000,
         timeoutMs: 90_000,
       })
       const usage = {

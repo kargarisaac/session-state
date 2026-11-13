@@ -18,6 +18,8 @@ export const GATE_CRITERIA = {
 const USER_CHARS = 8000
 const ANSWER_CHARS = 6000
 const PREVIOUS_CHARS = 2000
+// The first message of a chat and long messages usually set the task and its rules: they skip the gate.
+const ALWAYS_CHARS = 600
 
 // The end of the previous reply comes first: a short "yes" or "the second one" answers it.
 export const gateState = (turn: Turn): string =>
@@ -63,6 +65,7 @@ export const runGate = async (host: Host, config: Config, turn: Turn): Promise<G
   })
 
   if (config.gate === 'off') return done({ action: 'off' }, true)
+  if (turn.turn === 1 || turn.user.trim().length > ALWAYS_CHARS) return done({ action: 'always' }, true)
   if (config.jevKey === '') return done({ action: 'error', error: 'no OpenRouter key' }, false)
 
   try {

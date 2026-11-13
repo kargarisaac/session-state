@@ -2,16 +2,17 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, Register, ThemeKey } from 'claude-code'
 
 import { digestText } from '../core/digest'
+import { consolidate, standingRules } from '../core/consolidate'
 import { addToolCall, emptyFacts } from '../core/facts'
 import { fileIndex, rankFiles } from '../core/files'
-import { archivedTurns, fitLedger, parseLedger, parsePending, serializeLedger, serializePending, summarize, turnRecord } from '../core/ledger'
-import { activeNotes, newFront, parseOldNotes, pointerText, rulesText, upsertIndex } from '../core/notes'
+import { archivedTurns, fitLedger, LEDGER_MAX, parseLedger, parsePending, serializeLedger, serializePending, summarize, turnRecord } from '../core/ledger'
+import { activeNotes, newFront, parseOldNotes, pointerText, systemTexts, upsertIndex } from '../core/notes'
 import { processTurn } from '../core/pipeline'
-import { emptyState, HISTORY_HEAD, historyBlock, learnLabel, noteLabel, parseState, renderState, seedState } from '../core/state'
+import { emptyState, HISTORY_HEAD, historyBlock, learnLabel, noteLabel, parseState, renderState, seedState, topicNames, topicOf, topicSection } from '../core/state'
 import { appendStep, hasStep, lastStep, stepLines } from '../core/steps'
-import { answersOf, continuesFrom, hasMessage, parseTranscript, withAnswers } from '../core/transcript'
-import type { Config, Kind, State, Turn } from '../core/types'
-import type { ExtractEvent, LedgerEvent, PendingTurn, Status, Tab } from '../types'
+import { answersOf, continuesFrom, hasMessage, isAutomated, parseTranscript, withAnswers, withoutReminders } from '../core/transcript'
+import type { Config, Kind, LedgerEvent, State, Turn } from '../core/types'
+import type { ExtractEvent, PendingTurn, Status, Tab } from '../types'
 import { rows, statusOf } from './format'
 import { configOf, hostOf } from './host'
 import { baseOf, dirOf, eventsOf, folderName, historyOf, pendingOf, projectOf, stateOf, stepsOf, transcriptOf } from './paths'
@@ -23,6 +24,9 @@ const MAX_FAILED = 5
 const PANEL_STEPS = 40
 // A chat met mid-way (new install, upgrade, resume) is read back from its transcript, up to this many turns.
 const BACKFILL_MAX = 100
+// A topic section goes out with a typed prompt at most once in this many turns, and at most this long.
+const TOPIC_TURNS = 5
+const TOPIC_CHARS = 3000
 const TABS: Tab[] = ['steps', 'ledger', 'stats']
 const TAB_LABEL: Record<Tab, string> = { steps: 'Steps', ledger: 'Ledger', stats: 'Stats' }
 // What kind of note it is, as a theme colour, so a glance tells an ask from a rule.
@@ -37,7 +41,12 @@ const md = atom({ plugin: 'session-state', key: 'md' } as const, '')
 const steps = atom({ plugin: 'session-state', key: 'steps' } as const, '')
 const history = atom({ plugin: 'session-state', key: 'history' } as const, '')
 const events = atom({ plugin: 'session-state', key: 'events' } as const, [] as LedgerEvent[])
+const eventDirty = atom({ plugin: 'session-state', key: 'eventDirty' } as const, false)
+const systemCurrent = atom({ plugin: 'session-state', key: 'systemCurrent' } as const, ['', ''] as [string, string])
+const systemSnapshot = atom({ plugin: 'session-state', key: 'systemSnapshot' } as const, ['', ''] as [string, string])
+const recent = atom({ plugin: 'session-state', key: 'recent' } as const, [] as { turn: number; topics: string[] }[])
 const queue = atom({ plugin: 'session-state', key: 'queue' } as const, [] as PendingTurn[])
+const consolidations = atom({ plugin: 'session-state', key: 'consolidations' } as const, [] as { folder: string; turn: number }[])
 const failed = atom({ plugin: 'session-state', key: 'failed' } as const, [] as PendingTurn[])
 const pendingUser = atom({ plugin: 'session-state', key: 'pendingUser' } as const, '')
 const previousAnswer = atom({ plugin: 'session-state', key: 'previousAnswer' } as const, '')
@@ -46,6 +55,8 @@ const turns = atom({ plugin: 'session-state', key: 'turns' } as const, 0)
 const status = atom({ plugin: 'session-state', key: 'status' } as const, { isBusy: false, turn: 0, message: '' } as Status)
 const isPaused = atom({ plugin: 'session-state', key: 'isPaused' } as const, false)
 // Set when Claude Code compacts the main chat; the next typed prompt carries the digest and clears it.
+// The turn each topic section last went out with a typed prompt.
+const topicSent = atom({ plugin: 'session-state', key: 'topicSent' } as const, {} as Record<string, number>)
 const isCompacted = atom({ plugin: 'session-state', key: 'isCompacted' } as const, false)
 const tab = atom({ plugin: 'session-state', key: 'tab' } as const, 'steps' as Tab)
 const isHistoryShown = atom({ plugin: 'session-state', key: 'isHistoryShown' } as const, false)
@@ -98,8 +109,10 @@ const loadState = (text: string, front: Record<string, string>): State => {
   return { ...parsed, front: { ...front, ...parsed.front } }
 }
 
-const LEDGER_FILES = [stateOf, stepsOf, historyOf, eventsOf, pendingOf]
+const suggestionsOf = (folder: string) => `${folder}/suggestions.md`
+const LEDGER_FILES = [stateOf, stepsOf, historyOf, eventsOf, pendingOf, suggestionsOf]
 const MAX_PARENTS = 12
+const PEERS = 20
 
 // The transcript a ledger folder names in its state.md.
 const transcriptPathIn = async ($: EngineInterface, home: string, folder: string): Promise<string | undefined> => {
@@ -184,6 +197,8 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   }
   // What this process was recording until now. When that session compacted, this one is its continuation, and it
   // started in the same place, even if the person has since moved into a worktree.
+  stamps.clear()
+  renderedStats = undefined
   const before = { dir: await read($, dir), origin: await read($, origin), isCompacted: await read($, isCompacted), id: await read($, sessionId) }
   const previous = before.isCompacted ? before.dir : ''
   const home = (await $.env.get('HOME')) ?? ''
@@ -193,16 +208,18 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   const id8 = `_${id.slice(0, 8)}`
   const found = await findIn($, root, here, (name, kind) => kind === 'dir' && name.endsWith(id8))
   const folder = found ?? `${here}/${folderName(await dayOf($), id)}`
-  const transcript = await readText($, transcriptOf(cwd, id).replace(/^~/, home))
+  let transcript = found === undefined ? await readText($, transcriptOf(cwd, id).replace(/^~/, home)) : ''
   await update($, dir, () => folder)
   await update($, origin, () => cwd)
   const isContinued = found === undefined && (await inherit($, here, folder, home, id, transcript, previous))
+  if (before.dir !== folder) await update($, consolidations, list => isContinued ? list.map(job => job.folder === before.dir ? { ...job, folder } : job) : list.filter(job => job.folder !== before.dir))
 
   let ledger = parseLedger(await readText($, eventsOf(folder)))
   let pending = parsePending(await readText($, pendingOf(folder)))
   let text = await readText($, stateOf(folder))
   const stepsMd = await readText($, stepsOf(folder))
   if (ledger.length === 0 && pending.length === 0) {
+    if (found !== undefined) transcript = await readText($, transcriptOf(cwd, id).replace(/^~/, home))
     // The turns before the mod met this chat, read back from Claude Code's transcript and queued like live
     // ones. A continuation numbers them on from the steps it was given.
     const past = pastTurns(transcript).map(t => ({ ...t, turn: t.turn + (isContinued ? lastStep(stepsMd) : 0) }))
@@ -221,7 +238,8 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   }
   if (text === '' && pending.length === 0) {
     // A notes file from before 0.3 seeds the new ledger once; the old file is left as it is.
-    const old = await findIn($, root, here, (name, kind) => kind === 'file' && name.endsWith(`${id8}.md`))
+    const oldName = (await listOf($, here)).find(e => e.kind === 'file' && e.name.endsWith(`${id8}.md`))?.name
+    const old = oldName === undefined ? undefined : `${here}/${oldName}`
     if (old !== undefined) {
       const { title, notes } = parseOldNotes(await readText($, old))
       const front = { ...(await frontOf($, id)), title }
@@ -235,6 +253,13 @@ const boot = async ($: EngineInterface, id: string): Promise<string> => {
   const historyMd = await readText($, historyOf(folder))
   await update($, history, () => historyMd)
   await update($, events, () => ledger)
+  await update($, eventDirty, () => false)
+  const topics = ledger.flatMap(e => e.type === 'extract' && (e.topics?.length ?? 0) > 0 ? [{ turn: e.turn, topics: e.topics! }] : [])
+  const lastTopic = topics.reduce((last, t) => Math.max(last, t.turn), 0)
+  await update($, recent, () => topics.filter(t => t.turn > lastTopic - 3))
+  const system = systemTexts(loadState(text, {}))
+  await update($, systemCurrent, () => system)
+  await update($, systemSnapshot, () => system)
   await update($, queue, () => pending)
   // pendingUser and facts are not reset: a turn that is running now ends under this id, and they are its.
   if (!isContinued) await update($, failed, () => [])
@@ -285,12 +310,27 @@ const savePending = async ($: EngineInterface): Promise<void> => {
   await $.fs.write(pendingOf(await read($, dir)), serializePending(await read($, queue)))
 }
 
-const saveEvents = async ($: EngineInterface, add: LedgerEvent[]): Promise<LedgerEvent[]> => {
-  // The new events are added to what the atom holds when the write lands: a turn that ends while the last one is
-  // being saved adds its record to the same list. The archive is kept inside the engine's file size limit.
-  const all = await update($, events, list => fitLedger([...list, ...add]))
-  await $.fs.write(eventsOf(await read($, dir)), serializeLedger(all))
-  return all
+const addEvents = async ($: EngineInterface, add: LedgerEvent[]): Promise<void> => {
+  await update($, events, list => [...list, ...add])
+  await update($, eventDirty, () => true)
+}
+
+const saveEvents = async ($: EngineInterface): Promise<void> => {
+  await update($, eventDirty, () => false)
+  let text = ''
+  await update($, events, list => {
+    text = serializeLedger(list)
+    if (new TextEncoder().encode(text).length <= LEDGER_MAX) return list
+    const fitted = fitLedger(list)
+    text = serializeLedger(fitted)
+    return fitted
+  })
+  try {
+    await $.fs.write(eventsOf(await read($, dir)), text)
+  } catch (error) {
+    await update($, eventDirty, () => true)
+    throw error
+  }
 }
 
 const isFailure = (e: LedgerEvent): boolean => e.type === 'extract' && e.error !== undefined
@@ -311,24 +351,40 @@ const isHere = async ($: EngineInterface, folder: string): Promise<boolean> => (
 const handle = async ($: EngineInterface, config: Config, turn: PendingTurn, folder: string): Promise<boolean> => {
   const state = loadState(await readText($, stateOf(folder)), await frontOf($))
   const stepsMd = await readText($, stepsOf(folder))
-  const all = await read($, events)
-  if (isRecorded(stepsMd, all, turn)) return true
+  let all = await read($, events)
+  if (!all.some(e => e.type === 'turn' && e.turn === turn.turn && e.turnId === turn.turnId)) {
+    const record = turnRecord(turn, await $.clock.now())
+    await addEvents($, [record])
+    all = [...all, record]
+  }
+  if (isRecorded(stepsMd, all, turn)) {
+    if (await read($, eventDirty)) await saveEvents($).catch(quiet)
+    return true
+  }
   // A turn read back from the transcript sees only the turns before it, as it would have live.
   const ledger = all.filter(e => e.type !== 'turn' || e.turn <= turn.turn)
 
   const outcome = await processTurn(
     hostOf($, config),
     config,
-    { state, steps: stepLines(stepsMd), archive: archivedTurns(ledger), files: ranked(state, ledger, turn.turn) },
+    { state, steps: stepLines(stepsMd), archive: archivedTurns(ledger), files: ranked(state, ledger, turn.turn), events: ledger },
     turn,
   )
   if (!(await isHere($, folder))) return false
 
   // The state and the step line matter more than the archive: a failed write of it must not stop them.
-  await saveEvents($, outcome.events).catch(quiet)
+  await addEvents($, outcome.events)
+  const worked = outcome.events.flatMap(e => e.type === 'extract' && (e.topics?.length ?? 0) > 0 ? [{ turn: e.turn, topics: e.topics! }] : [])
+  if (worked.length > 0) await update($, recent, list => {
+    const next = [...list, ...worked]
+    const last = next.reduce((last, t) => Math.max(last, t.turn), 0)
+    return next.filter(t => t.turn > last - 3)
+  })
+  await saveEvents($).catch(quiet)
   const out = renderState(outcome.state, ranked(outcome.state, ledger, turn.turn))
   await $.fs.write(stateOf(folder), out)
   await update($, md, () => out)
+  await update($, systemCurrent, () => systemTexts(outcome.state))
   if (outcome.moved.length > 0) {
     const before = await readText($, historyOf(folder))
     const blocks = outcome.moved.map(historyBlock).join('\n\n')
@@ -344,6 +400,37 @@ const handle = async ($: EngineInterface, config: Config, turn: PendingTurn, fol
   // The chat can move on while these files are written. The folder it left has the turn, but the new one may have
   // copied that folder before, so the turn stays in the new queue (a copy that has it skips it).
   return isHere($, folder)
+}
+
+const compactLedger = async ($: EngineInterface, config: Config, folder: string, turn: number): Promise<boolean> => {
+  const state = loadState(await readText($, stateOf(folder)), await frontOf($))
+  const ledger = await read($, events)
+  const since = ledger.filter(e => e.type === 'consolidate' && e.error === undefined).at(-1)?.turn ?? 0
+  const outcome = await consolidate(hostOf($, config), state, await readText($, stepsOf(folder)), archivedTurns(ledger).filter(t => t.turn <= turn), since, turn, ranked(state, ledger, turn))
+  if (!(await isHere($, folder))) return false
+  if (outcome.error === undefined) {
+    const peers = await listOf($, dirOf(folder))
+    // Folder names start with the date: the newest chats of the project are enough to see a repeated rule.
+    const newest = peers.filter(e => e.kind === 'dir' && `${dirOf(folder)}/${e.name}` !== folder).map(e => e.name).sort().slice(-PEERS)
+    const others = await Promise.all(newest.map(async name => parseState(await readText($, stateOf(`${dirOf(folder)}/${name}`)))))
+    const suggestions = standingRules(outcome.state, others).map(n => `- ${n.text}`).join('\n')
+    if (outcome.moved.length > 0) {
+      const before = await readText($, historyOf(folder))
+      const nextHistory = `${before === '' ? HISTORY_HEAD : before}\n${outcome.moved.map(historyBlock).join('\n\n')}\n`
+      await $.fs.write(historyOf(folder), nextHistory)
+      await update($, history, () => nextHistory)
+    }
+    const out = renderState(outcome.state, ranked(outcome.state, ledger, turn))
+    await $.fs.write(stateOf(folder), out)
+    await update($, md, () => out)
+    await update($, systemCurrent, () => systemTexts(outcome.state))
+    await $.fs.write(suggestionsOf(folder), suggestions === '' ? '' : `${suggestions}\n`)
+  }
+  const count = (reason: string) => outcome.moved.filter(m => m.reason === reason).length
+  await addEvents($, [{ type: 'consolidate', at: await $.clock.now(), turn, merged: count('merged'), superseded: count('superseded'), done: count('done'), dropped: count('dropped'), skipped: outcome.skipped, topics: Object.keys(outcome.state.topics).length, usage: outcome.usage, ...(outcome.error === undefined ? {} : { error: outcome.error }) }])
+  await saveEvents($).catch(quiet)
+  if (outcome.error !== undefined) await update($, status, s => ({ ...s, message: `error: ${outcome.error!.slice(0, 140)}` }))
+  return true
 }
 
 // Runs outside any hook's budget, one turn at a time, so the next prompt is never held up.
@@ -363,7 +450,21 @@ const drain = async ($: EngineInterface, config: Config): Promise<void> => {
       await booting?.run.catch(quiet)
       const folder = await read($, dir)
       const next = (await read($, queue))[0]
-      if (next === undefined) break
+      const job = (await read($, consolidations))[0]
+      if (job !== undefined && (next === undefined || next.turn > job.turn)) {
+        let isDone = true
+        try {
+          if (job.folder === folder) isDone = await compactLedger($, config, folder, job.turn)
+        } catch (err) {
+          await update($, status, s => ({ ...s, message: `error: ${String(err).slice(0, 140)}` }))
+        }
+        if (isDone) await update($, consolidations, list => list[0]?.folder === job.folder && list[0]?.turn === job.turn ? list.slice(1) : list)
+        continue
+      }
+      if (next === undefined) {
+        if (await read($, eventDirty)) await saveEvents($).catch(quiet)
+        break
+      }
       await update($, status, s => ({ ...s, turn: next.turn }))
       let isDone = true
       try {
@@ -382,6 +483,9 @@ const drain = async ($: EngineInterface, config: Config): Promise<void> => {
     }
   } finally {
     await update($, status, s => ({ ...s, isBusy: false }))
+    if ((await read($, queue)).length > 0 || (await read($, consolidations)).length > 0) {
+      void $.clock.after(0, async () => { await drain($, config).catch(quiet) })
+    }
   }
 }
 
@@ -391,9 +495,12 @@ const flush = async ($: EngineInterface, options: PluginOptions): Promise<void> 
   const deadline = (await $.clock.now()) + 8000
   while ((await $.clock.now()) < deadline) {
     const isBusy = (await read($, status)).isBusy
-    if (!isBusy && (await read($, queue)).length === 0) return
+    if (!isBusy && (await read($, queue)).length === 0 && (await read($, consolidations)).length === 0 && !(await read($, eventDirty))) return
     if (isBusy) await $.clock.sleep(150)
-    else await drain($, config)
+    else {
+      await drain($, config)
+      if (await read($, eventDirty)) return
+    }
   }
 }
 
@@ -412,15 +519,33 @@ const hasChanged = (path: string, held: string, text: string): boolean => {
   return misses !== 1 && text !== held
 }
 
+const stamps = new Map<string, string>()
+
 const syncPanel = async ($: EngineInterface): Promise<void> => {
-  // The atoms are read first: a turn that lands while the files are read changes them, and then the turn wins.
   const held = { md: await read($, md), steps: await read($, steps), history: await read($, history) }
   const folder = await read($, dir)
   if (folder === '') return
-  const disk = { md: await readText($, stateOf(folder)), steps: await readText($, stepsOf(folder)), history: await readText($, historyOf(folder)) }
-  if (hasChanged(stateOf(folder), held.md, disk.md)) await update($, md, now => (now === held.md ? disk.md : now))
-  if (hasChanged(stepsOf(folder), held.steps, disk.steps)) await update($, steps, now => (now === held.steps ? disk.steps : now))
-  if (hasChanged(historyOf(folder), held.history, disk.history)) await update($, history, now => (now === held.history ? disk.history : now))
+  const changed = async (path: string, before: string): Promise<string | undefined> => {
+    const stat = await $.fs.stat(path).catch(() => undefined)
+    const stamp = stat === undefined ? 'missing' : `${stat.size}:${stat.mtimeMs}`
+    if (stamps.get(path) === stamp && (empties.get(path) ?? 0) === 0) return undefined
+    const text = stat === undefined ? '' : await readText($, path)
+    if (text !== '' || stat === undefined) stamps.set(path, stamp)
+    return hasChanged(path, before, text) ? text : undefined
+  }
+  const stateText = await changed(stateOf(folder), held.md)
+  const stepsText = await changed(stepsOf(folder), held.steps)
+  const historyText = await changed(historyOf(folder), held.history)
+  if (stateText !== undefined) {
+    let accepted = false
+    await update($, md, now => {
+      accepted = now === held.md
+      return accepted ? stateText : now
+    })
+    if (accepted) await update($, systemCurrent, () => systemTexts(loadState(stateText, {})))
+  }
+  if (stepsText !== undefined) await update($, steps, now => now === held.steps ? stepsText : now)
+  if (historyText !== undefined) await update($, history, now => now === held.history ? historyText : now)
 }
 
 // Empty when the ledger has nothing to hand over.
@@ -431,8 +556,11 @@ const digestOf = async ($: EngineInterface): Promise<string> => {
   const stepsMd = await read($, steps)
   // The queue still holds the turns Haiku has not finished, so the ledger leaves them out.
   const unrecorded = (await read($, queue)).filter(t => !hasStep(stepsMd, t.turn)).map(t => ({ turn: t.turn, user: t.user }))
-  return digestText(state, stepLines(stepsMd), ranked(state, ledger, await read($, turns)), folder, undefined, unrecorded)
+  return digestText(state, stepLines(stepsMd), ranked(state, ledger, await read($, turns)), folder, undefined, unrecorded, ledger)
 }
+
+let renderedState: { text: string; state: State } | undefined
+let renderedStats: { folder: string; length: number; stats: ReturnType<typeof summarize>; files: number } | undefined
 
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
@@ -448,7 +576,7 @@ export const register: Register = (on, options) => {
     // Picks up the person's hand edits for the panel and wakes a stranded queue.
     $.clock.every(3000, async () => {
       await syncPanel($).catch(quiet)
-      if ((await read($, queue)).length > 0 && !(await read($, status)).isBusy) kick($, options)
+      if (((await read($, queue)).length > 0 || await read($, eventDirty)) && !(await read($, status)).isBusy) kick($, options)
     })
     if (options.openPanelOnStart === true) void $.ui.open({ id: PANE, title: TITLE })
     return next(e)
@@ -466,11 +594,19 @@ export const register: Register = (on, options) => {
     // schedule, a peer or another plugin.
     const kind = e.origin?.kind
     const isTyped = kind === undefined || kind === 'composer' || kind === 'bridge' || kind === 'sdk'
-    if (!isTyped || e.command !== undefined || e.isMeta === true || e.text.trim() === '' || (await read($, isPaused))) return next(e)
+    // The app's events (another session finished a turn, a CI result) also come with no origin: only their text
+    // tells them apart. They make no turn and never take the digest.
+    const text = withoutReminders(e.text)
+    if (!isTyped || e.command !== undefined || e.isMeta === true || text === '' || isAutomated(text) || (await read($, isPaused))) return next(e)
     let digest = ''
+    let topicText = ''
+    let sent: string[] = []
+    let turn = 0
     try {
       await ensure($)
-      await update($, pendingUser, p => (p === '' ? e.text : `${p}\n\n${e.text}`))
+      const currentSystem = await read($, systemCurrent)
+      await update($, systemSnapshot, () => currentSystem)
+      await update($, pendingUser, p => (p === '' ? text : `${p}\n\n${text}`))
       // Taken before the digest is built: a second prompt that lands while it is being built finds the flag
       // down, so the agent is handed the digest once. If it cannot be built, the next prompt is owed it.
       let isOwed = false
@@ -486,15 +622,39 @@ export const register: Register = (on, options) => {
           throw error
         }
       }
+      turn = (await read($, turns)) + 1
+      const recentList = await read($, recent)
+      const latest = Math.max(0, ...recentList.map(t => t.turn))
+      const current = [...new Set(recentList.filter(t => t.turn > latest - (digest === '' ? 1 : 3)).reverse().flatMap(t => t.topics))]
+      if (digest !== '') sent = current.filter(t => digest.includes(`\n## ${t}\n`))
+      else {
+        const last = await read($, topicSent)
+        sent = current.filter(t => last[t] === undefined || turn - last[t]! > TOPIC_TURNS)
+        const state = sent.length === 0 ? undefined : loadState(await read($, md), {})
+        if (state !== undefined) sent = sent.filter(t => topicNames(state).includes(t)).slice(0, 2)
+        const text = state === undefined ? '' : sent.map(t => topicSection(state, t)).join('\n\n')
+        topicText = text.length <= TOPIC_CHARS ? text : `${text.slice(0, TOPIC_CHARS - 21).trimEnd()}…\n(cut; see state.md)`
+      }
     } catch {
       // never block a prompt
     }
-    const out = await next(digest === '' ? e : { ...e, context: [...(e.context ?? []), digest] })
+    const extra = digest || topicText
+    const out = await next(extra === '' ? e : { ...e, context: [...(e.context ?? []), extra] })
     if (out.drop !== undefined) {
       // Dropped beneath: the agent never saw it. It is not something the person asked, and the next typed
       // prompt carries the digest.
-      await update($, pendingUser, p => (p === e.text ? '' : p.endsWith(`\n\n${e.text}`) ? p.slice(0, -(e.text.length + 2)) : p)).catch(quiet)
+      await update($, pendingUser, p => (p === text ? '' : p.endsWith(`\n\n${text}`) ? p.slice(0, -(text.length + 2)) : p)).catch(quiet)
       if (digest !== '') await update($, isCompacted, () => true).catch(quiet)
+    } else {
+      if (sent.length > 0) await update($, topicSent, last => ({ ...last, ...Object.fromEntries(sent.map(t => [t, turn])) })).catch(quiet)
+      if (digest !== '') {
+        try {
+          await addEvents($, [{ type: 'digest', at: await $.clock.now(), turn, length: digest.length }])
+          kick($, options)
+        } catch {
+          // Bookkeeping must not fail the prompt.
+        }
+      }
     }
     return out
   })
@@ -510,6 +670,24 @@ export const register: Register = (on, options) => {
     if (e.agentId === undefined && out.deny === undefined) {
       const call = { tool: e.tool, input: e as unknown as Record<string, unknown>, isError: out.isError === true, text: out.text ?? '' }
       await update($, facts, f => addToolCall(f, call)).catch(quiet)
+      if (e.tool === 'Read' || e.tool === 'Bash' || e.tool === 'Grep') try {
+        const folder = await ensure($)
+        const input = e as unknown as Record<string, unknown>
+        const path = typeof input.file_path === 'string' ? input.file_path : ''
+        const text = e.tool === 'Bash' || e.tool === 'Grep' ? JSON.stringify(input) : ''
+        const names = ['state.md', 'steps.md', 'history.md', 'events.jsonl']
+        const file = e.tool === 'Read'
+          ? names.find(name => path === `${folder}/${name}`)
+          : (names.find(name => text.includes(`${folder}/${name}`)) ??
+            // The folder itself, not a sibling such as `<folder>-other`.
+            (new RegExp(`${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-])`).test(text) ? baseOf(folder) : undefined))
+        if (file !== undefined) {
+          await addEvents($, [{ type: 'read', at: await $.clock.now(), turn: (await read($, turns)) + 1, tool: e.tool, file }])
+          kick($, options)
+        }
+      } catch {
+        // Bookkeeping must not fail the tool call.
+      }
       if (e.tool === 'AskUserQuestion' && out.isError !== true) {
         const answers = answersOf(out.result ?? out.text)
         if (answers !== '') await update($, pendingUser, p => withAnswers(p, answers)).catch(quiet)
@@ -521,7 +699,18 @@ export const register: Register = (on, options) => {
   // Only notes that the main chat was compacted. It never changes, starts or skips a compaction.
   on('session.compact', async ($, e, next) => {
     const out = await next(e)
-    if (e.agentId === undefined && e.trigger !== 'precompute' && out.skip === undefined) await update($, isCompacted, () => true).catch(quiet)
+    if (e.agentId === undefined && e.trigger !== 'precompute' && out.skip === undefined) {
+      await update($, isCompacted, () => true).catch(quiet)
+      try {
+        if ((await read($, dir)) === '') await ensure($)
+        await addEvents($, [{ type: 'compaction', at: await $.clock.now(), turn: await read($, turns) }])
+        const job = { folder: await read($, dir), turn: await read($, turns) }
+        await update($, consolidations, list => [...list, job])
+        kick($, options)
+      } catch {
+        // Bookkeeping must not fail the compaction.
+      }
+    }
     return out
   })
 
@@ -553,7 +742,7 @@ export const register: Register = (on, options) => {
             facts: toolFacts,
           }
           await update($, turns, () => n)
-          await saveEvents($, [turnRecord(turn, await $.clock.now())]).catch(quiet)
+          await addEvents($, [turnRecord(turn, await $.clock.now())]).catch(quiet)
           await update($, queue, q => [...q, turn])
           await savePending($).catch(quiet)
           kick($, options)
@@ -571,10 +760,9 @@ export const register: Register = (on, options) => {
     try {
       const folder = await ensure($)
       const sections = [...out.sections, { id: 'session-state:ledger', text: pointerText(folder), scope: 'session' as const }]
-      if ((await configOf($, options)).pinRules) {
-        const rules = rulesText(loadState(await readText($, stateOf(folder)), {}))
-        if (rules !== '') sections.push({ id: 'session-state:rules', text: rules, scope: 'session' as const })
-      }
+      const [indexText, rules] = await read($, systemSnapshot)
+      if (indexText !== '') sections.push({ id: 'session-state:topics', text: indexText, scope: 'session' as const })
+      if (rules !== '' && (await configOf($, options)).pinRules) sections.push({ id: 'session-state:rules', text: rules, scope: 'session' as const })
       return { sections }
     } catch {
       return out
@@ -648,7 +836,9 @@ export const register: Register = (on, options) => {
     const shown = await read($, tab)
     const folder = await read($, dir)
     const columns = e.props.bodyColumns
-    const state = loadState(await read($, md), {})
+    const text = await read($, md)
+    if (renderedState?.text !== text) renderedState = { text, state: loadState(text, {}) }
+    const state = renderedState.state
     const active = activeNotes(state)
     const learnings = state.learnings.filter(l => l.status === 'active')
     const stepList = stepLines(await read($, steps))
@@ -711,7 +901,7 @@ export const register: Register = (on, options) => {
                   <Text dimColor>{`t${v.turn}`}</Text>
                 </Box>
                 <Box width={2}>
-                  <Text color={v.mark === '✓' ? 'success' : v.mark === '✗' ? 'error' : 'inactive'} bold>
+                  <Text color={v.mark === '✓' ? 'success' : v.mark === '✗' ? 'error' : v.mark === '⚠' ? 'warning' : 'inactive'} bold>
                     {v.mark}
                   </Text>
                 </Box>
@@ -770,13 +960,14 @@ export const register: Register = (on, options) => {
       const asks = active.filter(n => n.kind === 'ask')
       const rules = active.filter(n => n.kind !== 'ask')
       const roles = Object.entries(state.roles)
+      const suggestions = (await readText($, suggestionsOf(folder))).split('\n').filter(line => line.startsWith('- ')).map(line => line.slice(2))
       const wide = Math.max(20, columns - 4)
       // One entry: its id and kind on a line, then what it says, why, and the user's own words.
-      const entry = (id: string, kind: string, tone: ThemeKey, turn: number, text: string, why: string, quote: string) => (
+      const entry = (id: string, kind: string, tone: ThemeKey, turn: number, text: string, why: string, quote: string, count = 1) => (
         <Box key={id} flexDirection="column" marginBottom={1} width={wide}>
           <Text>
             <Text color={tone} bold>{`${kind} `}</Text>
-            <Text dimColor>{`${id} · t${turn}`}</Text>
+            <Text dimColor>{`${id} · t${turn}${count > 1 ? ` · said ${count} times` : ''}`}</Text>
           </Text>
           <Text>{text}</Text>
           {why !== '' && <Text dimColor>{why}</Text>}
@@ -793,10 +984,23 @@ export const register: Register = (on, options) => {
               <Text dimColor>Asks, decisions, rules and what failed collect here as the chat goes on.</Text>
             </Box>
           )}
+          {state.now !== '' && heading('Now')}
+          {state.now !== '' && <Text>{state.now}</Text>}
           {asks.length > 0 && heading('Open asks', asks.length)}
           {asks.map(n => entry(noteLabel(n.id), 'ask', KIND_TONE.ask, n.turn, n.text, n.why, n.quote === '' ? '' : `“${n.quote.replace(/^"|"$/g, '')}”`))}
-          {rules.length > 0 && heading('Decisions and rules', rules.length)}
-          {rules.map(n => entry(noteLabel(n.id), n.kind, KIND_TONE[n.kind], n.turn, n.text, n.why, n.quote === '' ? '' : `“${n.quote.replace(/^"|"$/g, '')}”`))}
+          {topicNames(state).map(topic => {
+            const notes = rules.filter(n => topicOf(n) === topic)
+            if (notes.length === 0) return null
+            return (
+              <Box key={topic} flexDirection="column">
+                {heading(topic, notes.length)}
+                {(state.topics[topic] ?? '') !== '' && <Text dimColor>{state.topics[topic]}</Text>}
+                {notes.map(n => entry(noteLabel(n.id), n.kind, KIND_TONE[n.kind], n.lastTurn ?? n.turn, n.text, n.why, n.quote === '' ? '' : `${n.via === undefined ? '' : `${n.via}: `}“${n.quote.replace(/^"|"$/g, '')}”`, n.count ?? 1))}
+              </Box>
+            )
+          })}
+          {suggestions.length > 0 && heading('Suggested for AGENTS.md', suggestions.length)}
+          {suggestions.map((text, i) => <Text key={i}>{text}</Text>)}
           {learnings.length > 0 && heading('Learned the hard way', learnings.length)}
           {learnings.map(l => entry(learnLabel(l.id), l.kind, l.kind === 'failed' ? 'error' : 'warning', l.turn, l.text, l.why, l.evidence))}
           {roles.length > 0 && heading('Files', roles.length)}
@@ -814,14 +1018,15 @@ export const register: Register = (on, options) => {
 
     const config = await configOf($, options)
     const ledger = await read($, events)
-    const stats = summarize(ledger)
+    if (renderedStats?.folder !== folder || renderedStats.length !== ledger.length) renderedStats = { folder, length: ledger.length, stats: summarize(ledger), files: fileIndex(archivedTurns(ledger)).length }
+    const stats = renderedStats.stats
     const failures = (await read($, failed)).length
     const input = {
       stats,
       asks: active.filter(n => n.kind === 'ask').length,
       rules: active.filter(n => n.kind !== 'ask').length,
       learnings: learnings.length,
-      files: fileIndex(archivedTurns(ledger)).length,
+      files: renderedStats.files,
       config,
       status: await read($, status),
       isPaused: await read($, isPaused),

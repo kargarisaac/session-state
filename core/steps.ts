@@ -1,10 +1,10 @@
 import type { Step } from './types'
 
 export const STEPS_HEAD =
-  '# Steps\nOne line per turn, oldest first: ✓ done, ✗ failed, ◌ stopped. The facts come from the tool calls; ' +
+  '# Steps\nOne line per turn, oldest first: ✓ done, ✗ failed, ◌ stopped, ⚠ not recorded (retry with /session-state retry). The facts come from the tool calls; ' +
   '+M-/L- is what the turn added to state.md, "done" what it finished.\n'
 
-const MARK: Record<Step['outcome'], string> = { ok: '✓', failed: '✗', aborted: '◌' }
+const MARK: Record<Step['outcome'], string> = { ok: '✓', failed: '✗', aborted: '◌', unrecorded: '⚠' }
 
 const oneLine = (s: string): string => s.replace(/\s+/g, ' ').trim()
 

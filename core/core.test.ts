@@ -1,19 +1,20 @@
 import { expect, test } from 'claude-code/testing'
 
+import { applyConsolidation, consolidate, standingRules } from './consolidate'
 import { contextText } from './context'
 import { digestText } from './digest'
 import { checkFileRoles, checkLearnings, checkMemories, isQuoteOf, parseExtraction, systemPrompt, wordCount } from './extract'
 import { addToolCall, emptyFacts, factsText } from './facts'
 import { fileIndex, rankFiles } from './files'
 import { gateState, parseGate } from './gate'
-import { archivedTurns, fitLedger, haikuCost, parseLedger, parsePending, serializeLedger, serializePending, summarize, turnRecord } from './ledger'
-import { activeNotes, applyMemories, newFront, openAsks, parseOldNotes, rulesText, upsertIndex } from './notes'
+import { archivedTurns, emptyUsage, fitLedger, haikuCost, parseLedger, parsePending, recentTopics, serializeLedger, serializePending, summarize, turnRecord } from './ledger'
+import { activeNotes, applyMemories, newFront, openAsks, parseOldNotes, pointerText, rulesText, systemTexts, upsertIndex } from './notes'
 import { processTurn } from './pipeline'
 import type { Ledger } from './pipeline'
 import { clip, redact } from './redact'
-import { applyFileRoles, applyLearnings, emptyState, historyBlock, parseState, renderState, seedState } from './state'
+import { applyFileRoles, applyLearnings, emptyState, historyBlock, parseState, renderState, seedState, topicIndex, topicSection } from './state'
 import { appendStep, stepLine, stepLines } from './steps'
-import { parseTranscript } from './transcript'
+import { isAutomated, parseTranscript, viaOf } from './transcript'
 import { DEFAULTS } from './types'
 import type { CompleteResult, Config, Host, Memory, State, Turn, TurnFacts } from './types'
 
@@ -47,7 +48,7 @@ const memory = (text: string, quote: string, over: Partial<Memory> = {}): Memory
 
 const json = (body: object): CompleteResult => ({ isOk: true, text: JSON.stringify(body), usage: USAGE })
 
-const reply = (over: { memories?: object[]; step?: string; title?: string; done?: number[]; files?: object[]; learnings?: object[]; need?: number } = {}): CompleteResult =>
+const reply = (over: { memories?: object[]; step?: string; title?: string; done?: number[]; files?: object[]; learnings?: object[]; need?: number; need_topic?: string; topics?: string[]; restates?: object[]; now?: string } = {}): CompleteResult =>
   json({
     title: over.title ?? '',
     step: { text: over.step ?? 'Did the thing.', outcome: 'ok' },
@@ -56,11 +57,15 @@ const reply = (over: { memories?: object[]; step?: string; title?: string; done?
     learnings: over.learnings ?? [],
     memories: over.memories ?? [],
     ...(over.need === undefined ? {} : { need: over.need }),
+    ...(over.need_topic === undefined ? {} : { need_topic: over.need_topic }),
+    ...(over.topics === undefined ? {} : { topics: over.topics }),
+    ...(over.restates === undefined ? {} : { restates: over.restates }),
+    ...(over.now === undefined ? {} : { now: over.now }),
   })
 
 // A host whose Jev answer and Haiku replies are scripted; it records every Haiku request.
 const fakeHost = (p: number | 'down', replies: CompleteResult[]) => {
-  const calls = { post: 0, complete: 0, requests: [] as { system: string; prompt: string; effort?: string }[] }
+  const calls = { post: 0, complete: 0, requests: [] as { system: string; prompt: string; effort?: string; maxTokens?: number }[] }
   const queue = [...replies]
   const host: Host = {
     now: async () => 1000,
@@ -159,7 +164,20 @@ test('tool calls become the turn facts: reads, edits, failed commands and commit
   expect(f.failures.length).toBe(1)
   expect(f.failures[0]!.error.includes('abcdef1234567890')).toBe(false)
   expect(f.commits).toEqual(['3fa2c1b Fix parser'])
-  expect(factsText(f, CWD)).toBe('edited b.ts · read 1 file · 2 commands, 1 failed · commit 3fa2c1b Fix parser')
+  expect(factsText(f, CWD)).toBe('edited b.ts · read 1 file · 2 commands · 1 failed · commit 3fa2c1b Fix parser')
+})
+
+test('every other tool is counted by name, MCP tools by server, and their failures are kept', async () => {
+  let f = emptyFacts()
+  for (let i = 0; i < 3; i++) f = addToolCall(f, { tool: 'mcp__Claude_Browser__computer', input: { action: 'click' }, isError: false, text: '' })
+  f = addToolCall(f, { tool: 'Agent', input: { description: 'audit' }, isError: false, text: '' })
+  f = addToolCall(f, { tool: 'mcp__Claude_Browser__navigate', input: { url: 'http://localhost:3000' }, isError: true, text: 'site refused' })
+  f = addToolCall(f, { tool: 'mcp__ccd_turn__update_plan', input: {}, isError: false, text: '' })
+  f = addToolCall(f, { tool: 'ToolSearch', input: {}, isError: false, text: '' })
+  expect(f.tools).toEqual({ Claude_Browser: 4, Agent: 1 })
+  expect(f.failures[0]!.command).toContain('mcp__Claude_Browser__navigate')
+  expect(f.failures[0]!.error).toBe('site refused')
+  expect(factsText(f, CWD)).toBe('4 Claude_Browser, 1 Agent · 1 failed')
 })
 
 test('a read that failed is not a file the chat touched', async () => {
@@ -201,13 +219,14 @@ test('only extraction asks for notes about the user; summarization says memories
   expect(systemPrompt('summarize', 15).includes('"need"')).toBe(false)
 })
 
-test('memory checks drop invented quotes, over-long notes and duplicates, and tidy ids and reasons', async () => {
+test('memory checks drop invented quotes and duplicates, clip long notes, and tidy ids and reasons', async () => {
   const { state } = applyMemories(fresh(), [memory('Use Postgres.', 'use Postgres')], 1, 'id-1', '')
   const user = 'Actually use SQLite, not Postgres. Keep it simple.'
   const longWhy = Array.from({ length: 80 }, (_, i) => `w${i}`).join(' ')
   const checked = checkMemories(
     [
       memory('Use SQLite.', 'use SQLite', { supersedes: [1, 99], refersTo: [1, 5, 9], why: longWhy }),
+      memory('Use SQLite.', 'use SQLite'),
       memory('Invented thing.', 'never said this'),
       memory('Use Postgres.', 'Postgres'),
       memory('one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen', 'Keep it simple'),
@@ -217,11 +236,12 @@ test('memory checks drop invented quotes, over-long notes and duplicates, and ti
     15,
     5,
   )
-  expect(checked.kept.length).toBe(1)
+  expect(checked.kept.length).toBe(3)
   expect(checked.kept[0]!.supersedes).toEqual([1])
   expect(checked.kept[0]!.refersTo).toEqual([1])
   expect(wordCount(checked.kept[0]!.why)).toBe(60)
-  expect(checked.overLong.length).toBe(1)
+  expect(wordCount(checked.kept[2]!.text)).toBe(15)
+  expect(checked.kept[2]!.quote).toBe('Keep it simple')
   expect(checked.dropped.length).toBe(2)
 })
 
@@ -268,25 +288,29 @@ test('state.md round-trips rich notes, learnings, roles and the person\'s own li
   )
   state = applyLearnings(state, [{ kind: 'failed', text: 'Bun test needs the plugin runner.', why: 'imports claude-code', evidence: 'Cannot find module', replaces: [] }], 3).state
   state = applyFileRoles(state, [{ path: `${CWD}/core/state.ts`, role: 'Reads and writes state.md' }])
-  state = { ...state, own: ['- ship on friday'] }
+  state = { ...state, now: 'Goal: ship\nDoing: tests', topics: { Storage: 'One file.' }, notes: state.notes.map((n, i) => i === 0 ? { ...n, topic: 'Storage', count: 3, lastTurn: 8, source: { ...n.source, refersTo: [1, 2] } } : n), own: ['- ship on friday'] }
   const files = fileIndex([turnRecord(turn('x', 3, { facts: withFacts({ edited: [`${CWD}/core/state.ts`] }) }), 0)])
   const md = renderState(state, files)
   expect(md).toContain('# Storage choice')
-  expect(md).toContain('### M-001 · decision · t3\nUse SQLite for storage.\nWhy: One file, no server.\nContext: Choosing the ledger store.\nQuote: "use SQLite"\nSource: t3 · turn turn-uui')
-  expect(md).toContain('## Open asks\n### M-002 · ask · t3')
+  expect(md).toContain('## Now\nGoal: ship\nDoing: tests')
+  expect(md).toContain('## Topic index\n- Storage: One file. M-001\n- Unsorted M-002')
+  expect(md).toContain('## Storage\n- M-001 · decision · Use SQLite for storage. "use SQLite" (t8, said 3 times)')
+  expect(md).toContain('## Unsorted\n- M-002 · ask · Rename the video.')
   expect(md).toContain('### L-001 · failed · t3')
   expect(md).toContain('- `core/state.ts` · edited 1 · t3 · role: Reads and writes state.md')
   expect(md).toContain('## Your notes\n- ship on friday')
 
   const again = parseState(md)
-  expect(again.notes.map(n => ({ ...n, source: { ...n.source, turnId: '' } }))).toEqual(state.notes.map(n => ({ ...n, source: { ...n.source, turnId: '' } })))
+  expect(again.notes).toEqual(state.notes)
+  expect(again.now).toBe(state.now)
+  expect(again.topics).toEqual({ Storage: 'One file.', Unsorted: '' })
   expect(again.learnings).toEqual(state.learnings)
   expect(again.roles).toEqual(state.roles)
   expect(again.own).toEqual(['- ship on friday'])
   expect(again.front.next_id).toBe('3')
 
   // The person deletes M-002 by hand: it stays gone and its id is not reused.
-  const edited = parseState(md.replace(/### M-002[\s\S]*?(?=\n## )/, ''))
+  const edited = parseState(md.replace(/- M-002 · ask[^\n]*\n/, ''))
   const next = applyMemories(edited, [memory('Use DuckDB.', 'q')], 9, '', '')
   expect(next.state.notes.map(n => n.id)).toEqual([1, 3])
 })
@@ -305,6 +329,50 @@ const richMd = (): string => {
   return renderState({ ...state, own: ['- ship on friday'] }, richFiles)
 }
 const richFiles = fileIndex([turnRecord(turn('x', 3, { facts: withFacts({ edited: [`${CWD}/core/state.ts`] }) }), 0)])
+
+test('a real old state.md keeps its notes when moved to the topic layout', () => {
+  const old = `## Open asks
+_None._
+
+## Decisions and rules
+### M-001 · requirement · t1
+Every Python file must start with the comment \`# owner: isaac\`.
+Why: So the user can grep for their own Python files.
+Context: Agent acknowledged the rule and asked whether to persist it in a CLAUDE.md, since a chat instruction only lasts this session.
+Quote: "every Python file must start with the comment # owner: isaac"
+Source: t1 · turn c593ddb5
+
+## Learnings
+### L-001 · constraint · t5
+The system python3 does not have pytest installed; it must be pip-installed before running tests.
+Why: Running pytest via the system python3 failed because the module was absent, and nothing in the repo declares it.
+Evidence: "/Library/Developer/CommandLineTools/usr/bin/python3: No module named pytest"
+
+## Files
+- \`calc.py\` · edited 2, read 1 · t2–t8 · role: Module defining add(a, b) for summing two values
+- \`test_calc.py\` · edited 2, read 1 · t5–t8 · role: pytest unit tests for calc.add()
+
+## Your notes
+`
+  const state = parseState(old)
+  expect(state.notes).toHaveLength(1)
+  expect(state.notes[0]).toMatchObject({ id: 1, kind: 'requirement', turn: 1, text: 'Every Python file must start with the comment `# owner: isaac`.', source: { turnId: 'c593ddb5', refersTo: [] } })
+  expect(state.notes[0]!.topic).toBeUndefined()
+  const back = parseState(renderState(state, []))
+  expect(back.notes).toEqual(state.notes.map(n => ({ ...n, count: 1, lastTurn: n.turn })))
+})
+
+test('topic notes keep hand edits and history records merged and dropped notes', () => {
+  const state = applyMemories(fresh(), [memory('Use SQLite.', 'SQLite', { topic: 'Storage', why: 'One file.' })], 2, 'full-turn-id', '').state
+  const md = renderState(state, []).replace('Use SQLite. "SQLite"', 'Use DuckDB. "DuckDB"').replace('Why: One file.', 'Why: Fast.')
+  const note = parseState(md).notes[0]!
+  const broken = md.replace(/<!-- .*? -->/, '<!-- null -->')
+  expect(parseState(broken).notes[0]).toMatchObject({ text: 'Use DuckDB.', quote: 'DuckDB' })
+  expect(note).toMatchObject({ text: 'Use DuckDB.', quote: 'DuckDB', why: 'Fast.', topic: 'Storage', count: 1, lastTurn: 2, source: { turnId: 'full-turn-id' } })
+  expect(historyBlock({ item: note, reason: 'merged', by: 3, turn: 4, note: 'Same rule.' })).toContain('merged into M-003 at t4')
+  expect(historyBlock({ item: note, reason: 'dropped', turn: 4, note: 'No longer needed.' })).toContain('dropped at t4')
+  expect(historyBlock({ item: note, reason: 'dropped', turn: 4, note: 'No longer needed.' })).toContain('Note: No longer needed.')
+})
 
 test('a state.md saved with Windows line endings reads the same as one with Unix endings', async () => {
   const md = richMd()
@@ -327,7 +395,7 @@ test('everything the person writes under "Your notes" is kept: blank lines, sub-
 
 test('a note heading the person broke does not take over the note above it', async () => {
   const two = applyMemories(fresh(), [memory('Use SQLite.', 'use SQLite', { why: 'One file.' }), memory('Keep answers short.', 'short', { why: 'Less to read.' })], 3, '', '').state
-  const md = renderState(two, []).replace('### M-002 · decision · t3', '### M-002 · decision')
+  const md = renderState(two, []).replace('- M-002 · decision ·', '- M-002 · broken ·')
   const state = parseState(md)
   expect(state.notes.map(n => [n.id, n.text, n.why])).toEqual([[1, 'Use SQLite.', 'One file.']])
 })
@@ -373,7 +441,7 @@ test('an old single-file notes file seeds the ledger with its active notes only'
   expect(notes).toEqual([{ id: 3, turn: 3, kind: 'decision', text: 'Use SQLite.' }])
   const state = seedState(notes, { ...FRONT, title })
   expect(state.front.next_id).toBe('4')
-  expect(renderState(state, [])).toContain('### M-003 · decision · t3\nUse SQLite.')
+  expect(renderState(state, [])).toContain('- M-003 · decision · Use SQLite. (t3)')
 })
 
 // ---- files, digest, context
@@ -389,14 +457,24 @@ test('edited and recent files rank above files read once long ago, and keep thei
   expect(ranked[0]).toMatchObject({ edits: 1, reads: 1, role: 'state.md writer' })
 })
 
-test('the digest puts asks and rules first, cuts the least needed to fit, and ends with the path', async () => {
-  const { state } = applyMemories(fresh(), [memory('Rename the video.', 'rename it', { kind: 'ask' }), memory('Use SQLite.', 'use SQLite', { why: 'simple' })], 2, '', '')
+test('the digest puts the last steps, then asks, then rules first, newest first, and ends with the path', async () => {
+  const { state } = applyMemories(
+    fresh(),
+    [memory('Rename the video.', 'rename it', { kind: 'ask' }), memory('Keep it local.', 'keep it local', { kind: 'requirement' }), memory('Use SQLite.', 'use SQLite', { why: 'simple' })],
+    2,
+    '',
+    '',
+  )
+  const more = applyMemories(state, [memory('Never push to main.', 'never push', { kind: 'correction' })], 5, '', '').state
   const steps = Array.from({ length: 30 }, (_, i) => `- t${i + 1} · ✓ · Step number ${i + 1} with some words to fill the line`)
-  const full = digestText(state, steps, [], '/h/ledger')
-  expect(full.indexOf('## Open asks')).toBeLessThan(full.indexOf('## Decisions and rules'))
-  expect(full).toContain('- M-002 (t2) Use SQLite. Why: simple User: "use SQLite"')
+  const full = digestText(more, steps, [], '/h/ledger')
+  expect(full.indexOf('## Recent steps')).toBeLessThan(full.indexOf('## Open asks'))
+  expect(full.indexOf('## Open asks')).toBeLessThan(full.indexOf('## Rules and corrections'))
+  expect(full.indexOf('## Rules and corrections')).toBeLessThan(full.indexOf('## Decisions'))
+  expect(full.indexOf('Never push to main.')).toBeLessThan(full.indexOf('Keep it local.'))
+  expect(full).toContain('- M-003 (t2) Use SQLite. Why: simple User: "use SQLite"')
   expect(full).toContain('- t30 ·')
-  expect(full.includes('- t20 ·')).toBe(false)
+  expect(full.includes('- t25 ·')).toBe(false)
   expect(full.endsWith('Full ledger: /h/ledger/state.md (steps.md has every turn).')).toBe(true)
   const small = digestText(state, steps, [], '/h/ledger', 400)
   expect(small.length).toBeLessThan(400)
@@ -414,7 +492,7 @@ test('Haiku sees the ledger, recent steps, earlier user messages verbatim, the p
     files: [],
     turn: turn('yes, the second one', 13, { previousAnswer: 'Option one or option two?', facts: withFacts({ edited: [`${CWD}/x.ts`] }) }),
   })
-  expect(text).toContain('M-001 [decision] Use SQLite.')
+  expect(text).toContain('Unsorted M-001')
   expect(text).toContain('- t12 · ✓ · Did it.')
   expect(text).toContain('t12: message number 12')
   expect(text).toContain('t3: message number 3')
@@ -443,13 +521,13 @@ test('a real Jev answer parses, a malformed one reports an error, and the gate s
 
 test('below the threshold one low-effort summarization runs: a step, no notes about the user', async () => {
   const { host, calls } = fakeHost(0.2, [reply({ step: 'Ran the tests; all pass.', memories: [{ kind: 'decision', text: 'X.', quote: 'run the tests' }] })])
-  const out = await processTurn(host, config(), ledgerOf(fresh()), turn('run the tests'))
+  const out = await processTurn(host, config(), ledgerOf(fresh()), turn('run the tests', 2, { facts: withFacts({ commands: 1 }) }))
   expect(calls.complete).toBe(1)
   expect(calls.requests[0]!.effort).toBe('low')
   expect(out.events[0]).toMatchObject({ type: 'gate', action: 'skip', p: 0.2 })
   expect(out.events[1]).toMatchObject({ type: 'extract', mode: 'summarize', kept: 0 })
   expect(out.state.notes.length).toBe(0)
-  expect(out.step).toMatchObject({ turn: 1, outcome: 'ok', text: 'Ran the tests; all pass.' })
+  expect(out.step).toMatchObject({ turn: 2, outcome: 'ok', text: 'Ran the tests; all pass.' })
 })
 
 test('above the threshold one extraction at the set effort saves a rich note with its source', async () => {
@@ -459,7 +537,7 @@ test('above the threshold one extraction at the set effort saves a rich note wit
   const out = await processTurn(host, config(), ledgerOf(fresh()), turn('Please use SQLite from now on.', 7))
   expect(calls.post).toBe(1)
   expect(calls.complete).toBe(1)
-  expect(calls.requests[0]!.effort).toBe('high')
+  expect(calls.requests[0]!.effort).toBe('medium')
   expect(out.state.front.title).toBe('Storage choice')
   expect(out.state.notes[0]).toMatchObject({ id: 1, turn: 7, text: 'Use SQLite for storage.', why: 'No server to run.', context: 'Picking a store.', source: { turnId: 'id-7', refersTo: [] } })
   expect(out.step.added).toEqual(['M-001'])
@@ -479,12 +557,68 @@ test('extraction may ask for one older turn, and answers again with it in view',
   expect(out.events[1]).toMatchObject({ need: 3, kept: 1 })
 })
 
-test('an over-long note is asked again once and the short version is kept', async () => {
+test('a restated note is counted once only when the quote is in the message', async () => {
+  const state = applyMemories(fresh(), [memory('Ask before paid runs.', 'ask before any paid run', { kind: 'requirement', topic: 'Spend' })], 1, '', '').state
+  const { host } = fakeHost(0.95, [reply({ restates: [{ id: 'M-001', quote: 'ask before any paid run' }, { id: 1, quote: 'ask before any paid run' }, { id: 99, quote: 'made up' }] })])
+  const out = await processTurn(host, config(), ledgerOf(state), turn('Please ask before any paid run.', 2))
+  expect(out.state.notes.length).toBe(1)
+  expect(out.state.notes[0]).toMatchObject({ id: 1, count: 2, lastTurn: 2 })
+  const invalid = fakeHost(0.95, [reply({ restates: [{ id: 1, quote: 'never said this' }] })])
+  const next = await processTurn(invalid.host, config(), ledgerOf(out.state), turn('Something else.', 3))
+  expect(next.state.notes[0]!.count).toBe(2)
+})
+
+test('matching quotes count as a repeat while a replacement moves the old note', async () => {
+  const state = applyMemories(fresh(), [memory('Ask before paid runs.', 'please ask before any paid run', { kind: 'requirement', topic: 'Spend' })], 1, '', '').state
+  const { host } = fakeHost(0.95, [reply({ memories: [{ kind: 'requirement', topic: 'Spend', text: 'Ask before paid runs.', quote: 'ask before any paid run' }] })])
+  const out = await processTurn(host, config(), ledgerOf(state), turn('Always ask before any paid run.', 2))
+  expect(out.state.notes.length).toBe(1)
+  expect(out.state.notes[0]).toMatchObject({ id: 1, count: 2, lastTurn: 2 })
+  expect(out.step.added).toEqual([])
+  const other = fakeHost(0.95, [reply({ memories: [{ kind: 'requirement', topic: 'Travel', text: 'Ask before travel spending.', quote: 'ask before any paid run' }] })])
+  const separate = await processTurn(other.host, config(), ledgerOf(out.state), turn('Please ask before any paid run.', 3))
+  expect(separate.state.notes).toHaveLength(2)
+  const changed = fakeHost(0.95, [reply({ memories: [{ kind: 'requirement', topic: 'Spend', text: 'Never run paid jobs.', quote: 'never run paid jobs', supersedes: [1] }] })])
+  const next = await processTurn(changed.host, config(), ledgerOf(out.state), turn('Instead, never run paid jobs.', 3))
+  expect(next.state.notes).toHaveLength(1)
+  expect(next.state.notes[0]).toMatchObject({ id: 2, topic: 'Spend', count: 1, lastTurn: 3 })
+  expect(next.moved[0]).toMatchObject({ reason: 'superseded', by: 2 })
+})
+
+test('recent topics are shown and one more topic can be requested', async () => {
+  const state = applyMemories(fresh(), [memory('Use SQLite.', 'use SQLite', { topic: 'Storage' }), memory('Ask before paid runs.', 'ask before paid runs', { topic: 'Spend' })], 1, '', '').state
+  const first = fakeHost(0.95, [reply({ topics: ['Storage'] })])
+  const recorded = await processTurn(first.host, config(), ledgerOf(state), turn('storage work', 2))
+  const { host, calls } = fakeHost(0.95, [reply({ need_topic: 'Spend' }), reply({ topics: ['Storage', 'Spend'] })])
+  const out = await processTurn(host, config(), ledgerOf(state, { events: recorded.events }), turn('check the spend rule', 3))
+  expect(calls.complete).toBe(2)
+  expect(calls.requests[0]!.prompt).toContain('## Storage\n')
+  expect(calls.requests[0]!.prompt.includes('## Spend\n')).toBe(false)
+  expect(calls.requests[1]!.prompt).toContain('## Spend\n- M-002')
+  expect(out.events[1]).toMatchObject({ topics: ['Storage', 'Spend'] })
+})
+
+test('summarize updates Now and clips it to fifteen lines', async () => {
+  const lines = Array.from({ length: 18 }, (_, i) => `Line ${i + 1}`)
+  const { host, calls } = fakeHost(0.2, [reply({ now: lines.join('\n') })])
+  const out = await processTurn(host, config(), ledgerOf({ ...fresh(), now: 'Old goal' }), turn('run tests', 2, { facts: withFacts({ commands: 1 }) }))
+  expect(calls.requests[0]!.prompt).toContain('Old goal')
+  expect(out.state.now).toBe(lines.slice(0, 15).join('\n'))
+  const noNow = fakeHost(0.2, [reply()])
+  const next = await processTurn(noNow.host, config(), ledgerOf(out.state), turn('okay', 3))
+  expect(next.state.now).toBe(out.state.now)
+})
+
+test('an over-long note is clipped without another call', async () => {
   const long = { kind: 'decision', text: 'one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen', quote: 'use SQLite' }
   const { host, calls } = fakeHost(0.95, [reply({ memories: [long] }), reply({ memories: [{ kind: 'decision', text: 'Use SQLite.', quote: 'use SQLite' }] })])
   const out = await processTurn(host, config(), ledgerOf(fresh()), turn('use SQLite please'))
-  expect(calls.complete).toBe(2)
-  expect(activeNotes(out.state).map(n => n.text)).toEqual(['Use SQLite.'])
+  expect(calls.complete).toBe(1)
+  expect(activeNotes(out.state).map(n => n.text)).toEqual(['one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen…'])
+  expect(activeNotes(out.state)[0]!.quote).toBe('use SQLite')
+  const invalid = fakeHost(0.95, [reply({ memories: [{ ...long, quote: 'made up quote' }] })])
+  const rejected = await processTurn(invalid.host, config(), ledgerOf(fresh()), turn('use SQLite please'))
+  expect(rejected.state.notes).toEqual([])
 })
 
 test('a note whose quote is invented is dropped, not saved', async () => {
@@ -497,7 +631,7 @@ test('a note whose quote is invented is dropped, not saved', async () => {
 
 test('with Jev down or off, Haiku extracts so nothing is lost', async () => {
   const down = fakeHost('down', [reply()])
-  const outDown = await processTurn(down.host, config(), ledgerOf(fresh()), turn('use SQLite'))
+  const outDown = await processTurn(down.host, config(), ledgerOf(fresh()), turn('use SQLite', 2))
   expect(outDown.events[0]).toMatchObject({ action: 'error' })
   expect(outDown.events[1]).toMatchObject({ mode: 'extract' })
   const off = fakeHost(0, [reply()])
@@ -505,6 +639,21 @@ test('with Jev down or off, Haiku extracts so nothing is lost', async () => {
   expect(off.calls.post).toBe(0)
   expect(outOff.events[0]).toMatchObject({ action: 'off' })
   expect(outOff.events[1]).toMatchObject({ mode: 'extract' })
+})
+
+test('the first turn of a chat and a message over 600 characters skip the gate and get extraction', async () => {
+  const first = fakeHost(0.1, [reply()])
+  const outFirst = await processTurn(first.host, config(), ledgerOf(fresh()), turn('build the parser', 1))
+  expect(first.calls.post).toBe(0)
+  expect(outFirst.events[0]).toMatchObject({ action: 'always' })
+  expect(outFirst.events[1]).toMatchObject({ mode: 'extract' })
+  const long = fakeHost(0.1, [reply()])
+  const outLong = await processTurn(long.host, config(), ledgerOf(fresh()), turn('x '.repeat(301), 7))
+  expect(long.calls.post).toBe(0)
+  expect(outLong.events[1]).toMatchObject({ mode: 'extract' })
+  const short = fakeHost(0.1, [reply()])
+  const outShort = await processTurn(short.host, config(), ledgerOf(fresh()), turn('x '.repeat(299), 7))
+  expect(outShort.events[0]).toMatchObject({ action: 'skip' })
 })
 
 test('Haiku failing twice keeps the state, records the error, and the step falls back to the user words', async () => {
@@ -515,6 +664,13 @@ test('Haiku failing twice keeps the state, records the error, and the step falls
   expect(out.state.notes.length).toBe(0)
   expect(out.step).toMatchObject({ outcome: 'aborted', text: 'Asked: use SQLite' })
   expect(out.events[1]).toMatchObject({ type: 'extract', kept: 0, error: 'haiku: no scripted reply' })
+})
+
+test('a turn Haiku could not write up is marked unrecorded, not done', async () => {
+  const { host } = fakeHost(0.95, [])
+  const out = await processTurn(host, config(), ledgerOf(fresh()), turn('use SQLite', 1))
+  expect(out.step.outcome).toBe('unrecorded')
+  expect(stepLine(out.step)).toContain('- t1 · ⚠ ·')
 })
 
 test('a Haiku call that throws counts as a failed attempt: the turn still gets its step line and an error event', async () => {
@@ -545,7 +701,7 @@ test('one turn can finish an ask, record a learning, name a file and replace a d
   expect(out.moved.map(m => m.reason)).toEqual(['superseded', 'done'])
   expect(out.state.learnings.map(l => l.text)).toEqual(['ffmpeg here lacks the h265 codec.'])
   expect(out.state.roles).toEqual({ 'video.ts': 'Renders the product video' })
-  expect(out.step).toMatchObject({ added: ['M-003', 'L-001'], done: ['M-001'], facts: 'edited video.ts · 1 command, 1 failed' })
+  expect(out.step).toMatchObject({ added: ['M-003', 'L-001'], done: ['M-001'], facts: 'edited video.ts · 1 command · 1 failed' })
   expect(out.events[1]).toMatchObject({ kept: 1, learned: 1, closed: 1, roles: 1 })
 })
 
@@ -553,15 +709,21 @@ test('one turn can finish an ask, record a learning, name a file and replace a d
 
 test('the ledger round-trips, keeps the turn archive, and its totals match the events', async () => {
   const { host } = fakeHost(0.95, [reply({ memories: [{ kind: 'decision', text: 'Use SQLite.', quote: 'use SQLite' }] })])
-  const t = turn('use SQLite, key sk-or-v1-abcdef1234567890abcdef', 1, { facts: withFacts({ read: ['/a'] }) })
+  const t = turn('use SQLite, key sk-or-v1-abcdef1234567890abcdef', 2, { facts: withFacts({ read: ['/a'] }) })
   const out = await processTurn(host, config(), ledgerOf(fresh()), t)
   const events = parseLedger(serializeLedger([turnRecord(t, 5), ...out.events]))
   expect(events.slice(1)).toEqual(out.events)
-  expect(archivedTurns(events)[0]).toMatchObject({ turn: 1, facts: { read: ['/a'] } })
+  expect(archivedTurns(events)[0]).toMatchObject({ turn: 2, facts: { read: ['/a'] } })
   expect(archivedTurns(events)[0]!.user.includes('abcdef1234567890')).toBe(false)
   const stats = summarize(events)
   expect(stats).toMatchObject({ turns: 1, passed: 1, saved: 1, jevCalls: 1, extractions: 1, summaries: 0 })
   expect(stats.haikuCost).toBe(haikuCost(USAGE))
+  const activity = parseLedger(serializeLedger([
+    { type: 'compaction', at: 10, turn: 2 },
+    { type: 'digest', at: 11, turn: 3, length: 100 },
+    { type: 'read', at: 12, turn: 3, tool: 'Read', file: 'state.md' },
+  ]))
+  expect(summarize(activity)).toMatchObject({ compactions: 1, digests: 1, reads: 1 })
   expect(parsePending(serializePending([t]))).toEqual([t])
   expect(parsePending('[{"turn":1,"turnId":"x","user":"u","answer":"a"}]')[0]!.facts).toEqual(emptyFacts())
 })
@@ -589,16 +751,37 @@ test('a full ledger gives up the words of its oldest turns first, then its oldes
   expect(tiny[0]).toMatchObject({ type: 'turn', turn: 40 - tiny.length + 1 })
 })
 
-test('the rules for the system prompt are only requirements and preferences, newest eight', async () => {
-  expect(rulesText(fresh())).toBe('')
-  const rules = Array.from({ length: 10 }, (_, i) => memory(`Rule ${i + 1}.`, 'q', { kind: 'requirement' }))
-  const { state } = applyMemories(fresh(), [...rules, memory('Use SQLite.', 'q'), memory('Rename it.', 'q', { kind: 'ask' }), memory('Short answers.', 'q', { kind: 'preference' })], 1, '', '')
-  const text = rulesText(state)
-  expect(text).toContain('- Short answers.')
-  expect(text).toContain('- Rule 10.')
-  expect(text.includes('- Rule 3.')).toBe(false)
-  expect(text.includes('Use SQLite')).toBe(false)
-  expect(text).toContain('3 older rules are in state.md')
+test('the pointer names the ledger layout and how to search it', () => {
+  const text = pointerText('/ledger')
+  for (const part of ['/ledger/', 'Now', 'topic index', '## <topic>', 'M-012', 'Grep state.md', 'grep events.jsonl', 'exact past words']) expect(text).toContain(part)
+})
+
+test('core rules are corrections and repeated user rules, newest first within the cap', () => {
+  const notes = applyMemories(fresh(), [
+    memory('Old rule ' + 'x'.repeat(80), 'q', { kind: 'requirement' }),
+    memory('Once only', 'q', { kind: 'preference' }),
+    memory('Repeated rule', 'q', { kind: 'preference' }),
+    memory('A correction', 'q', { kind: 'correction' }),
+    memory('Relayed correction', 'q', { kind: 'correction' }),
+  ], 1, '', '').state.notes.map((n, i) => ({ ...n, turn: i + 1, count: i === 0 || i === 2 ? 2 : 1, ...(i === 4 ? { via: 'Lead' } : {}) }))
+  const text = rulesText({ ...fresh(), notes }, 130)
+  expect(text.indexOf('A correction')).toBeLessThan(text.indexOf('Repeated rule'))
+  expect(text).toContain('1 more in state.md')
+  expect(text.includes('Once only') || text.includes('Relayed correction') || text.includes('Old rule')).toBe(false)
+  expect(text.length).toBeLessThanOrEqual(130)
+})
+
+test('the digest puts unrecorded turns, Now, index, steps and current topics first', () => {
+  const base = applyMemories(fresh(), [memory('Use SQLite', 'SQLite', { kind: 'decision' }), memory('Finish tests', 'tests', { kind: 'ask' }), memory('No pushes', 'pushes', { kind: 'correction' })], 1, '', '').state
+  const state = { ...base, now: 'Goal: ship', topics: { Storage: 'SQLite' }, notes: base.notes.map((n, i) => ({ ...n, topic: i === 0 ? 'Storage' : 'Other' })) }
+  const event = { type: 'extract' as const, at: 0, turn: 1, turnId: 't1', model: 'h', mode: 'extract' as const, ms: 0, usage: emptyUsage(), kept: 0, learned: 0, closed: 0, roles: 0, dropped: [], topics: ['Storage'] }
+  const text = digestText(state, ['- t1 · step'], [], '/ledger', 8000, [{ turn: 2, user: 'still recording' }], [event])
+  const parts = ['Not in the ledger yet', '## Now', '## Topic index', '## Recent steps', '## Storage', '## Open asks', '## Rules and corrections']
+  for (let i = 1; i < parts.length; i++) expect(text.indexOf(parts[i - 1]!)).toBeLessThan(text.indexOf(parts[i]!))
+  expect(text).toContain('Goal: ship')
+  expect(text).toContain('Use SQLite')
+  expect(text.match(/Use SQLite/g)?.length).toBe(1)
+  expect(text.length).toBeLessThanOrEqual(8000)
 })
 
 test('the index keeps one row per session folder, newest first', async () => {
@@ -636,4 +819,169 @@ test('a transcript reads back as typed turns with the last reply, tool facts and
   expect(first!.user).toBe("Use SQLite.\n\n[Answers to the agent's questions]\n- Which file? → db.ts\n\nand keep it local")
   expect(first!.facts.edited).toEqual(['/work/demo/db.ts'])
   expect(second).toMatchObject({ turn: 2, turnId: 'u2', user: 'what is this?', answer: '', previousAnswer: 'Switched to SQLite.' })
+})
+
+test('a transcript drops app events and reminders, and keeps messages from other sessions with their sender', () => {
+  const text = [
+    line({ type: 'user', uuid: 'u1', message: { content: '<system-reminder>Linked sessions now.</system-reminder>\nUse SQLite.' } }),
+    line({ type: 'user', uuid: 'u2', message: { content: '<side-sessions-event>docs finished a turn</side-sessions-event>' } }),
+    line({ type: 'user', uuid: 'u3', message: { content: '<cross-session-message from="local_1" name="Lead">Ask before paid runs.</cross-session-message>' } }),
+  ].join('\n')
+  const turns = parseTranscript(text)
+  expect(turns.map(t => t.user)).toEqual(['Use SQLite.', '<cross-session-message from="local_1" name="Lead">Ask before paid runs.</cross-session-message>'])
+  expect(viaOf(turns[1]!.user)).toBe('Lead')
+  expect(viaOf(turns[0]!.user)).toBeUndefined()
+  expect(isAutomated('<system-reminder>x</system-reminder>\n<ci-monitor-event>CI passed</ci-monitor-event>')).toBe(true)
+})
+
+test('a note relayed by another session keeps its sender through state.md, says so in the digest and is never pinned', () => {
+  const { state } = applyMemories(fresh(), [memory('Ask before any paid run.', 'Ask before any paid run', { kind: 'requirement' })], 2, 'id-2', '', [], 'Lead')
+  const back = parseState(renderState(state, []))
+  expect(back.notes[0]!.via).toBe('Lead')
+  expect(renderState(state, [])).toContain('Lead: "Ask before any paid run"')
+  expect(rulesText(back)).toBe('')
+  expect(digestText(back, [], [], '/d')).toContain('Via Lead: "Ask before any paid run"')
+})
+
+test('topic helpers: index in order with note ids, one section per topic, recent topics newest first', async () => {
+  const base = fresh()
+  const note = (id: number, topic: string | undefined, count = 1) => ({
+    id, turn: id, kind: 'requirement' as const, text: `Rule ${id}.`, why: 'Because.', context: '', quote: `rule ${id}`,
+    source: { turnId: `t${id}`, refersTo: [] }, status: 'active' as const, topic, count,
+  })
+  const state = { ...base, topics: { PRs: 'Isaac merges.' }, notes: [note(1, 'PRs', 3), note(2, undefined), note(3, 'PRs')] }
+  expect(topicIndex(state)).toBe('- PRs: Isaac merges. M-001 M-003\n- Unsorted M-002')
+  expect(systemTexts(state)[0]).toBe('Topic index:\n- PRs: Isaac merges.\n- Unsorted')
+  expect(topicSection(state, 'PRs')).toBe('## PRs\n- M-001 · requirement · Rule 1. "rule 1" (t1, said 3 times)\n  Why: Because.\n- M-003 · requirement · Rule 3. "rule 3" (t3)\n  Why: Because.')
+  const ev = (turn: number, topics: string[]) => ({ type: 'extract' as const, at: 0, turn, turnId: `t${turn}`, model: 'h', mode: 'extract' as const, ms: 0, usage: emptyUsage(), kept: 0, learned: 0, closed: 0, roles: 0, dropped: [], topics })
+  expect(recentTopics([ev(1, ['Old']), ev(5, ['A']), ev(6, ['B', 'A'])], 3)).toEqual(['B', 'A'])
+})
+
+test('consolidation records every removed note and keeps merge evidence', () => {
+  const state = applyMemories(fresh(), [
+    memory('Never merge a pull request.', 'Never merge a pull request.', { kind: 'requirement' }),
+    memory('Do not merge pull requests.', 'Do not merge pull requests.', { kind: 'requirement' }),
+    memory('Use SQLite.', 'Use SQLite.'),
+    memory('Use Postgres.', 'Use Postgres.'),
+    memory('Run the tests.', 'Run the tests.', { kind: 'ask' }),
+    memory('Run old checks.', 'Run old checks.', { kind: 'ask' }),
+  ], 1, 'id-1', '', []).state
+  state.notes[1]!.count = 2
+  state.notes[1]!.lastTurn = 7
+  const out = applyConsolidation(state, JSON.stringify({
+    merges: [{ keep: 1, drop: [2] }], replaces: [{ old: 3, new: 4 }], done: [5], dropped: [{ id: 6, reason: 'Abandoned' }],
+    topics: [{ name: 'Work', summary: 'Project rules' }], assign: [{ id: 1, topic: 'Work' }, { id: 4, topic: 'Work' }],
+  }), 8)
+  expect(out.state.notes.map(n => n.id)).toEqual([1, 4])
+  expect(out.state.notes[0]).toMatchObject({ count: 3, lastTurn: 7, quote: 'Never merge a pull request.', topic: 'Work' })
+  expect(out.moved.map(m => [m.item.id, m.reason, m.by, m.note])).toEqual([
+    [2, 'merged', 1, undefined], [3, 'superseded', 4, undefined], [5, 'done', undefined, undefined], [6, 'dropped', undefined, 'Abandoned'],
+  ])
+})
+
+test('consolidation never drops a rule: that item is skipped and the rest still applies', async () => {
+  const state = applyMemories(fresh(), [
+    memory('Never merge pull requests.', 'Never merge pull requests.', { kind: 'requirement' }),
+    memory('Run the old checks.', 'Run the old checks.', { kind: 'ask' }),
+  ], 1, 'id-1', '', []).state
+  const { host } = fakeHost(1, [json({ merges: [], replaces: [], done: [], dropped: [{ id: 1, reason: 'old' }, { id: 2, reason: 'abandoned' }], topics: [], assign: [{ id: 99, topic: 'Nope' }] })])
+  const out = await consolidate(host, state, '', [], 0, 1, [])
+  expect(out.error).toBe(undefined)
+  expect(out.skipped).toBe(2)
+  expect(out.state.notes.map(n => n.id)).toEqual([1])
+  expect(out.moved.map(m => [m.item.id, m.reason])).toEqual([[2, 'dropped']])
+})
+
+test('two ledgers with the same rule yield one standing suggestion', () => {
+  const make = () => applyMemories(fresh(), [memory('Never merge pull requests without user approval.', 'Never merge pull requests without user approval.', { kind: 'requirement' })], 1, 'id-1', '', []).state
+  expect(standingRules(make(), [make(), make()]).map(n => n.text)).toEqual(['Never merge pull requests without user approval.'])
+})
+
+test('consolidation uses only user messages since the last pass', async () => {
+  const state = fresh()
+  const { host, calls } = fakeHost(1, [json({ merges: [], replaces: [], done: [], dropped: [], topics: [], assign: [] })])
+  const archive = [turn('old words', 1), turn('new words', 2), turn('<cross-session-message name="lead">other words</cross-session-message>', 3)].map(t => turnRecord(t, 1000))
+  const out = await consolidate(host, state, '- t1 · ✓ · Old step\n- t2 · ✓ · Worked', archive, 1, 3, [])
+  expect(out.error).toBe(undefined)
+  expect(calls.requests[0]!.effort).toBe('medium')
+  expect(calls.requests[0]!.maxTokens).toBe(12000)
+  expect(calls.requests[0]!.prompt).toContain('Worked')
+  expect(calls.requests[0]!.prompt.includes('Old step')).toBe(false)
+  expect(calls.requests[0]!.prompt).toContain('new words')
+  expect(calls.requests[0]!.prompt.includes('old words')).toBe(false)
+  expect(calls.requests[0]!.prompt.includes('other words')).toBe(false)
+})
+
+test('opposite rules are not suggested as the same rule', () => {
+  const make = (text: string) => applyMemories(fresh(), [memory(text, text, { kind: 'requirement' })], 1, 'id-1', '', []).state
+  expect(standingRules(make('Never merge pull requests without user approval.'), [make('Always merge pull requests without user approval.')])).toEqual([])
+})
+
+test('a note whose text has double quotes round-trips through the topic layout', async () => {
+  const state = { ...fresh(), notes: [{ id: 1, turn: 2, kind: 'requirement' as const, text: 'Call it "Nablo Data Agent" in public.', why: 'Plain names.', context: 'Blog copy.', quote: 'say "Nablo Data Agent"', source: { turnId: 'u2', refersTo: [1] }, status: 'active' as const, topic: 'Naming', count: 2, lastTurn: 9, via: 'lead' }] }
+  expect(parseState(renderState(state, [])).notes).toEqual(state.notes)
+})
+
+
+test('summaries see shorter context while extractions keep the full context', () => {
+  const state = { ...fresh(), now: 'Working', topics: { Storage: 'A detailed topic summary' } }
+  const earlier = Array.from({ length: 12 }, (_, i) => turnRecord(turn(`earlier ${i + 1}`, i + 1), 0))
+  const context = { state, steps: Array.from({ length: 15 }, (_, i) => `step ${i + 1}!`), earlier, files: [{ path: '/work/demo/file.ts', reads: 1, edits: 0, first: 1, last: 1, role: '', score: 1 }], topics: ['Storage'], turn: turn('go', 13, { previousAnswer: 'START' + 'x'.repeat(1500) + 'END' }) }
+  const small = contextText(context, 'summarize')
+  const full = contextText(context, 'extract')
+  expect(small).toContain('Working')
+  expect(small).toContain('Storage')
+  expect(small.includes('A detailed topic summary')).toBe(false)
+  expect(small.includes('Recent topic sections:')).toBe(false)
+  expect(small.includes('file.ts')).toBe(false)
+  expect(small.includes('step 10!')).toBe(false)
+  expect(small).toContain('step 11!')
+  expect(small.includes('earlier 9\n')).toBe(false)
+  expect(small).toContain('earlier 10')
+  expect(small.includes('START')).toBe(false)
+  expect(small).toContain('END')
+  expect(full).toContain('A detailed topic summary')
+  expect(full).toContain('file.ts')
+  expect(full).toContain('step 1!')
+  expect(full).toContain('START')
+})
+
+test('retries raise the output cap and count all calls', async () => {
+  for (const bad of [{ isOk: false as const, reason: 'max-tokens', usage: USAGE }, { isOk: true as const, text: '', usage: USAGE }, { isOk: true as const, text: '{broken', usage: USAGE }]) {
+    const extract = fakeHost(0.9, [bad, reply()])
+    const result = await processTurn(extract.host, config(), ledgerOf(fresh()), turn('keep it', 2))
+    expect(extract.calls.requests.map(r => r.maxTokens)).toEqual([12000, 16000])
+    expect(result.events[1]).toMatchObject({ calls: 2, mode: 'extract' })
+    const summary = fakeHost(0.1, [bad, reply()])
+    const short = await processTurn(summary.host, config(), ledgerOf(fresh()), turn('go', 2, { facts: withFacts({ commands: 1 }) }))
+    expect(summary.calls.requests.map(r => r.maxTokens)).toEqual([2000, 4000])
+    expect(short.events[1]).toMatchObject({ calls: 2, mode: 'summarize' })
+  }
+})
+
+test('only a gate skip with no work and a short reply avoids the model', async () => {
+  const state = { ...fresh(), now: 'Keep this goal' }
+  const skipped = fakeHost(0.1, [])
+  const result = await processTurn(skipped.host, config(), ledgerOf(state), turn('Okay', 2, { facts: withFacts({ read: ['/read'] }) }))
+  expect(skipped.calls.complete).toBe(0)
+  expect(result.state.now).toBe('Keep this goal')
+  expect(result.step).toMatchObject({ outcome: 'ok', text: 'Asked: Okay' })
+  expect(result.events[1]).toMatchObject({ mode: 'summarize', calls: 0 })
+  for (const over of [
+    { facts: withFacts({ edited: ['x'] }) }, { facts: withFacts({ commands: 1 }) },
+    { facts: withFacts({ failures: [{ command: 'x', error: 'bad' }] }) },
+    { facts: withFacts({ tools: { Search: 1 } }) }, { answer: 'x'.repeat(1500) },
+  ]) {
+    const host = fakeHost(0.1, [reply()])
+    await processTurn(host.host, config(), ledgerOf(state), turn('Okay', 2, over))
+    expect(host.calls.complete).toBe(1)
+  }
+  for (const p of [0.9, 'down' as const]) {
+    const host = fakeHost(p, [reply()])
+    await processTurn(host.host, config(), ledgerOf(state), turn('Okay', 2))
+    expect(host.calls.complete).toBe(1)
+  }
+  const off = fakeHost(0.1, [reply()])
+  await processTurn(off.host, config({ gate: 'off' }), ledgerOf(state), turn('Okay', 2))
+  expect(off.calls.complete).toBe(1)
 })

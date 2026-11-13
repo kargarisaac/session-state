@@ -1,8 +1,10 @@
 import { factsText, shortPath } from './facts'
-import { activeNotes } from './notes'
+import { openAsks } from './notes'
 import { tidy } from './redact'
-import { learnLabel, noteLabel, roleOf } from './state'
+import { learnLabel, noteLine, roleOf, topicIndex, topicNames, topicSection } from './state'
+import { viaOf } from './transcript'
 import type { FileEntry, State, Turn, TurnRecord } from './types'
+import type { Mode } from './extract'
 
 const STEPS = 15
 const EARLIER = 10
@@ -20,6 +22,7 @@ export type TurnContext = {
   earlier: readonly TurnRecord[]
   files: readonly FileEntry[]
   turn: Turn
+  topics?: readonly string[]
   looked?: TurnRecord
 }
 
@@ -29,29 +32,36 @@ export const unnamedFiles = (c: Pick<TurnContext, 'state' | 'turn'>): string[] =
 
 const list = (lines: string[]): string => (lines.length === 0 ? '(none)' : lines.join('\n'))
 
-export const contextText = (c: TurnContext): string => {
+export const contextText = (c: TurnContext, mode: Mode = 'extract'): string => {
+  const summary = mode === 'summarize'
+  const stepCount = summary ? 5 : STEPS
   const cwd = c.state.front.cwd ?? ''
-  const notes = activeNotes(c.state).map(n => `${noteLabel(n.id)} [${n.kind}] ${n.text}${n.why === '' ? '' : ` (why: ${n.why})`}`)
+  const asks = openAsks(c.state).map(noteLine)
   const learnings = c.state.learnings.filter(l => l.status === 'active').map(l => `${learnLabel(l.id)} [${l.kind}] ${l.text}`)
   const files = c.files.map(f => `${shortPath(f.path, cwd)}${roleOf(c.state, f.path) === '' ? '' : ` · ${roleOf(c.state, f.path)}`}`)
-  const earlier = c.earlier.slice(-EARLIER).map(r => `t${r.turn}: ${tidy(r.user, EARLIER_CHARS)}`)
+  const earlier = c.earlier.slice(-(summary ? 3 : EARLIER)).map(r => `t${r.turn}: ${tidy(r.user, EARLIER_CHARS)}`)
   const f = c.turn.facts
   const failures = f.failures.map(x => `failed: ${x.command}\n${x.error}`)
   const unnamed = unnamedFiles(c).map(p => shortPath(p, cwd))
   return [
     `Current title: ${c.state.front.title === undefined || c.state.front.title === '' ? '(none)' : c.state.front.title}`,
     '',
-    'Active notes (the ledger), oldest first:',
-    list(notes),
+    'Now:',
+    c.state.now || '(none)',
+    '',
+    'Topic index:',
+    (summary ? topicNames(c.state).join('\n') : topicIndex(c.state)) || '(none)',
+    '',
+    ...(summary ? [] : ['Recent topic sections:', list((c.topics ?? []).map(topic => topicSection(c.state, topic))), '']),
+    'Open asks:',
+    list(asks),
     '',
     'Active learnings:',
     list(learnings),
     '',
-    'Files that matter:',
-    list(files),
-    '',
-    `Last ${STEPS} steps:`,
-    list(c.steps.slice(-STEPS)),
+    ...(summary ? [] : ['Files that matter:', list(files), '']),
+    `Last ${stepCount} steps:`,
+    list(c.steps.slice(-stepCount)),
     '',
     "The user's earlier messages, oldest first:",
     list(earlier),
@@ -60,9 +70,11 @@ export const contextText = (c: TurnContext): string => {
       ? []
       : [`Turn t${c.looked.turn}, which you asked for:`, `User: ${tidy(c.looked.user, LOOKED_CHARS)}`, `Agent: ${tidy(c.looked.answer, LOOKED_CHARS)}`, '']),
     'Previous agent reply:',
-    c.turn.previousAnswer === '' ? '(none)' : tidy(c.turn.previousAnswer, PREVIOUS_CHARS),
+    c.turn.previousAnswer === '' ? '(none)' : summary ? tidy(c.turn.previousAnswer.slice(-1500), 1500) : tidy(c.turn.previousAnswer, PREVIOUS_CHARS),
     '',
-    `THIS TURN, t${c.turn.turn}. The user's message:`,
+    viaOf(c.turn.user) === undefined
+      ? `THIS TURN, t${c.turn.turn}. The user's message:`
+      : `THIS TURN, t${c.turn.turn}. A message from another Claude session, "${viaOf(c.turn.user)}", not typed by the user:`,
     tidy(c.turn.user, USER_CHARS),
     '',
     "The agent's reply:",

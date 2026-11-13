@@ -34,6 +34,7 @@ export const rows = (p: PanelInput): Row[] => {
   const haikuIn = stats.haikuUsage.input + stats.haikuUsage.cacheRead + stats.haikuUsage.cacheWrite
   return [
     { label: 'Turns', value: `${stats.turns} seen · ${stats.passed} passed the gate · ${stats.skipped} skipped` },
+    { label: 'Ledger', value: `${plural(stats.compactions, 'compaction')} · ${plural(stats.digests, 'digest')} delivered · ${plural(stats.reads, 'ledger read')}` },
     {
       label: 'Gate',
       value:

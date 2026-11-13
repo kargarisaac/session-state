@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The side panel</title>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=JetBrains+Mono:wght@400;600&family=Kalam:wght@700&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing:border-box; }
+  :root { --paper:#E9ECF3; --ink:#1D2333; --ink-3:#5B6377; --shadow: 0 1px 2px rgb(0 0 0 / .08), 0 8px 28px rgb(20 26 50 / .10); }
+  body { margin:0; background:var(--paper); font:16px/1.6 "Atkinson Hyperlegible", system-ui, sans-serif; color:var(--ink); }
+  .figure { background:#fff; border-radius:12px; box-shadow:var(--shadow); padding:18px 20px 14px; margin:24px; width:1000px; }
+  h1 { font:700 26px/1.2 Kalam, cursive; margin:0 0 2px; } .sub { color:var(--ink-3); margin:0 0 12px; font-size:15px; }
+  .row { display:grid; grid-template-columns:repeat(3, 1fr); gap:12px; }
+  .term { background:#1E1F24; border-radius:8px; padding:12px 12px 14px; font:10.8px/1.55 "JetBrains Mono", monospace; color:#E4E6EB; min-height:470px; }
+  .bar { display:flex; gap:6px; margin-bottom:6px; } .bar span { width:9px; height:9px; border-radius:50%; background:#4A4D57; }
+  .tabs { color:#8E93A0; } .tabs b { color:#9DB4FF; font-weight:600; } .rule { color:#3C3F48; overflow:hidden; white-space:nowrap; }
+  .h { color:#A6ABB8; font-weight:600; letter-spacing:.04em; margin-top:8px; } .h i { font-style:normal; color:#6E7380; font-weight:400; }
+  .d { color:#8E93A0; } .q { color:#8E93A0; font-style:italic; } .ok { color:#5BC48A; } .warn { color:#E3B04B; }
+  .req { color:#E3B04B; font-weight:600; } .pref { color:#B48CF0; font-weight:600; } .ask { color:#6FB7FF; font-weight:600; }
+  .add { color:#5BC48A; } .lbl { color:#8E93A0; display:inline-block; width:54px; }
+  .cap { color:var(--ink-3); font-size:14px; margin:10px 0 0; }
+  .t { font:700 14px Kalam, cursive; color:var(--ink); margin:0 0 6px; }
+</style></head><body><div class="figure">
+<h1>The side panel</h1>
+<p class="sub"><code>/session-state</code> opens one panel with three tabs. Shown after a four-turn demo chat.</p>
+<div class="row">
+<div><p class="t">Steps: one line per turn</p><div class="term">
+<div class="bar"><span></span><span></span><span></span></div>
+<div class="tabs"><b>[ Steps 4 ]</b> Ledger 2  Stats</div><div class="rule">────────────────────────────────────────</div>
+<div><span class="d">t1</span> <span class="ok">✓</span> Planned calc.py with add(); set the owner-comment rule.</div>
+<div class="add">&nbsp;&nbsp;&nbsp;+M-001 +M-002</div>
+<div><span class="d">t2</span> <span class="ok">✓</span> Wrote calc.py and test_calc.py with pytest.</div>
+<div class="add">&nbsp;&nbsp;&nbsp;+M-003</div>
+<div><span class="d">t3</span> <span class="ok">✓</span> Added the owner comment to test_calc.py.</div>
+<div><span class="d">t4</span> <span class="ok">✓</span> All tests pass; calc is done.</div>
+<div class="add">&nbsp;&nbsp;&nbsp;✓ M-002</div>
+<div style="margin-top:10px" class="d">✓ done · ✗ failed · ◌ stopped · ⚠ not recorded</div>
+</div></div>
+<div><p class="t">Ledger: Now, then rules by topic</p><div class="term">
+<div class="bar"><span></span><span></span><span></span></div>
+<div class="tabs">Steps 4 <b>[ Ledger 2 ]</b> Stats</div><div class="rule">────────────────────────────────────────</div>
+<div class="d"><b style="color:#E4E6EB">[ Now ]</b> History · true right now</div>
+<div class="h">NOW</div>
+<div>Goal: a small calc module with tests<br>Doing: nothing<br>Waiting on: the user<br>Open asks: none</div>
+<div class="h">CODE STYLE <i>1</i></div>
+<div><span class="req">requirement</span> <span class="d">M-001 · t3 · said 2 times</span></div>
+<div>Every Python file starts with '# owner: demo'.</div>
+<div class="d">So the user can grep for their files.</div>
+<div class="q">“Every Python file must start with the comment # owner: demo”</div>
+<div class="h">TESTS <i>1</i></div>
+<div><span class="pref">preference</span> <span class="d">M-003 · t2</span></div>
+<div>Use pytest, not unittest.</div>
+<div class="d">The user prefers plain asserts.</div>
+<div class="q">“use pytest for the tests, not unittest”</div>
+</div></div>
+<div><p class="t">Stats: counts, gate and cost</p><div class="term">
+<div class="bar"><span></span><span></span><span></span></div>
+<div class="tabs">Steps 4  Ledger 2 <b>[ Stats ]</b></div><div class="rule">────────────────────────────────────────</div>
+<div class="ok">● Idle</div>
+<div class="h">LEDGER</div>
+<div>0 open asks · 2 decisions and rules<br>0 learnings · 0 files</div>
+<div class="h">PIPELINE</div>
+<div><span class="lbl">Turns</span>4 seen · 4 passed the gate</div>
+<div><span class="lbl">Ledger</span>0 compactions · 0 digests · 0 reads</div>
+<div><span class="lbl">Gate</span>jev-1.14 · pass at p ≥ 0.63</div>
+<div><span class="lbl">Haiku</span>4 extractions (medium)</div>
+<div><span class="lbl">Saved</span>3 notes · 1 ask closed</div>
+<div><span class="lbl">Cost</span>Jev &lt;$0.0001 · Haiku ≈ $0.0005</div>
+<div class="h">RECENT GATE DECISIONS</div>
+<div>t1 &nbsp;— &nbsp;&nbsp;&nbsp;&nbsp;<span class="ok">always</span><br>t2 &nbsp;p 0.95 <span class="ok">extract</span><br>t3 &nbsp;p 0.95 <span class="ok">extract</span><br>t4 &nbsp;p 0.95 <span class="ok">extract</span></div>
+</div></div>
+</div>
+<p class="cap">t3 said the owner-comment rule again, so M-001 counts 2 and stays one note. t4 finished the ask M-002, so it moved to history.md. t1 skipped the gate: the first message always gets extraction. Text from the panel's own render in a test chat (<code>hooks/register.tsx</code>, <code>ui.render</code>); colours follow your theme.</p>
+</div></body></html>

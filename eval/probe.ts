@@ -1,6 +1,6 @@
 // Step 5: does the ledger keep what matters? Replays real chats through the pipeline, then asks questions
 // about each chat that a long-running agent must still answer after compaction, and grades the answers.
-//   OPENROUTER_API_KEY=... bun eval/probe.ts <transcript.jsonl>...   → eval/PROBES.md
+//   [OPENROUTER_API_KEY=...] bun eval/probe.ts <transcript.jsonl>...   → eval/PROBES.md (no key: the gate is off)
 //
 // Four probe types, after Factory's compression evaluation: recall (what the user asked or said), files (which
 // file holds what), decision (what was chosen and why), continuation (what is still open at the end).
@@ -9,13 +9,15 @@
 //   ledger   state.md and steps.md as the mod wrote them during the replay
 //   both     summary and ledger: what the agent has after a compaction with the mod on
 // Haiku, Sonnet and Jev run on the Claude Code login and OpenRouter; nothing is written outside eval/.
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { digestText } from '../core/digest'
 import { fileIndex, rankFiles } from '../core/files'
 import { factsText } from '../core/facts'
-import { archivedTurns, turnRecord } from '../core/ledger'
-import { newFront } from '../core/notes'
+import { addUsage, archivedTurns, turnRecord } from '../core/ledger'
+import { newFront, pointerText, systemTexts } from '../core/notes'
+import { consolidate } from '../core/consolidate'
 import { processTurn } from '../core/pipeline'
 import { emptyState, HISTORY_HEAD, historyBlock, renderState } from '../core/state'
 import { appendStep, stepLines } from '../core/steps'
@@ -25,45 +27,59 @@ import { ask, clipText, DATA, jsonIn, pool, readSession } from './lib'
 import type { EvalSession } from './lib'
 
 const KEY = process.env.OPENROUTER_API_KEY ?? ''
-if (KEY === '') throw new Error('OPENROUTER_API_KEY is not set')
 const FILES = process.argv.slice(2)
-if (FILES.length === 0) throw new Error('usage: bun eval/probe.ts <transcript.jsonl>...')
+if (FILES.length === 0) throw new Error('usage: [PROBE_TURNS=200] [PROBE_REPORT=PROBES.md] bun eval/probe.ts <transcript.jsonl>...')
+// A long chat is cut to its first turns: the probe writer and the summary read the whole chat in one call.
+const MAX_TURNS = Number(process.env.PROBE_TURNS ?? '') || Infinity
+const REPORT = process.env.PROBE_REPORT ?? 'PROBES.md'
+// The chat as the probe writer reads it is kept under this many characters; long chats get shorter turns.
+const CHAT_CHARS = 600_000
 
 const TAIL = 5
 const PROBES_PER_TYPE = 3
 const TYPES = ['recall', 'files', 'decision', 'continuation'] as const
 type ProbeType = (typeof TYPES)[number]
 type Probe = { type: ProbeType; question: string; answer: string; turn: number }
-const CONDITIONS = ['summary', 'ledger', 'both'] as const
+const CONDITIONS = ['summary', 'ledger', 'both', 'after'] as const
 type Condition = (typeof CONDITIONS)[number]
 
 const ZERO = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
-const config: Config = { ...DEFAULTS, jevKey: KEY }
+// With no key the gate is off and Haiku extracts every turn, so runs without a key compare only with each other.
+const config: Config = { ...DEFAULTS, jevKey: KEY, gate: KEY === '' ? 'off' : 'jev' }
 
-const host: Host = {
+const hostOf = (totals: { calls: number; ms: number; usage: typeof ZERO }): Host => ({
   now: async () => Date.now(),
   random: () => 1,
   complete: async ({ system, prompt, effort }) => {
+    totals.calls++
+    let usage = ZERO
     try {
-      return { isOk: true, text: await ask('haiku', system, prompt, effort ?? config.effort), usage: ZERO }
+      const text = await ask('haiku', system, prompt, effort ?? config.effort, (got, ms) => { usage = got; totals.usage = addUsage(totals.usage, got); totals.ms += ms })
+      return { isOk: true, text, usage }
     } catch (err) {
-      return { isOk: false, reason: String(err).slice(0, 200), usage: ZERO }
+      return { isOk: false, reason: String(err).slice(0, 200), usage }
     }
   },
   post: async (url, headers, body) => {
     const res = await fetch(url, { method: 'POST', headers, body })
     return { status: res.status, text: await res.text() }
   },
-}
+})
 
 // The chat as text: every user message, the agent's reply and what its tools did.
-const transcriptText = (s: EvalSession, cwd: string, upTo = Infinity): string =>
-  s.turns
-    .filter(t => t.n <= upTo)
-    .map(t => `## t${t.n}\nUSER: ${clipText(t.user, 4000)}\nAGENT: ${clipText(t.answer, 3000)}${t.facts === undefined ? '' : `\nTOOLS: ${factsText(t.facts, cwd) || 'none'}`}`)
+const transcriptText = (s: EvalSession, cwd: string): string => {
+  const per = Math.floor(CHAT_CHARS / Math.max(1, s.turns.length))
+  const user = Math.min(4000, Math.floor(per * 0.6))
+  const answer = Math.min(3000, Math.floor(per * 0.35))
+  return s.turns
+    .map(t => `## t${t.n}\nUSER: ${clipText(t.user, user)}\nAGENT: ${clipText(t.answer, answer)}${t.facts === undefined ? '' : `\nTOOLS: ${factsText(t.facts, cwd) || 'none'}`}`)
     .join('\n\n')
+}
 
 const replay = async (s: EvalSession, cwd: string, out: string) => {
+  const tag = s.id.slice(0, 8)
+  const totals = { calls: 0, ms: 0, usage: { ...ZERO } }
+  const host = hostOf(totals)
   let state: State = emptyState(newFront({ sessionId: s.id, project: s.project, cwd, started: '', transcript: '' }))
   let steps = ''
   let history = ''
@@ -72,21 +88,33 @@ const replay = async (s: EvalSession, cwd: string, out: string) => {
     const turn = { turn: t.n, turnId: `${s.id}:${t.n}`, user: t.user, answer: t.answer, previousAnswer: t.previousAnswer, isAborted: false, facts: t.facts! }
     events = [...events, turnRecord(turn, Date.now())]
     const files = rankFiles(fileIndex(archivedTurns(events)), state, t.n)
-    const outcome = await processTurn(host, config, { state, steps: stepLines(steps), archive: archivedTurns(events), files }, turn)
+    const outcome = await processTurn(host, config, { state, steps: stepLines(steps), archive: archivedTurns(events), files, events }, turn)
     events = [...events, ...outcome.events]
     state = outcome.state
     steps = appendStep(steps, outcome.step)
     if (outcome.moved.length > 0) history = `${history === '' ? HISTORY_HEAD : history}\n${outcome.moved.map(historyBlock).join('\n\n')}\n`
     const gate = outcome.events[0]
     const extract = outcome.events[1]
-    console.log(`  t${t.n} ${gate?.type === 'gate' ? `p=${gate.p} ${gate.action}` : ''} ${extract?.type === 'extract' ? `${extract.mode} +${extract.kept} notes +${extract.learned} learned${extract.error === undefined ? '' : ` ERROR ${extract.error}`}` : ''}`)
+    console.log(`  ${tag} t${t.n} ${gate?.type === 'gate' ? `p=${gate.p} ${gate.action}` : ''} ${extract?.type === 'extract' ? `${extract.mode} +${extract.kept} notes +${extract.learned} learned${extract.error === undefined ? '' : ` ERROR ${extract.error}`}` : ''}`)
+  }
+  // The compaction at the end runs the consolidation pass, as the hook does.
+  const pass = await consolidate(host, state, steps, archivedTurns(events), 0, s.turns.length, rankFiles(fileIndex(archivedTurns(events)), state, s.turns.length))
+  console.log(`  ${tag} consolidate ${pass.error ?? `${pass.moved.length} moved, ${pass.skipped} skipped, ${Object.keys(pass.state.topics).length} topics`}`)
+  if (pass.error === undefined) {
+    state = pass.state
+    if (pass.moved.length > 0) history = `${history === '' ? HISTORY_HEAD : history}\n${pass.moved.map(historyBlock).join('\n\n')}\n`
   }
   const md = renderState(state, rankFiles(fileIndex(archivedTurns(events)), state, s.turns.length))
   writeFileSync(join(out, 'state.md'), md)
   writeFileSync(join(out, 'steps.md'), steps)
   writeFileSync(join(out, 'history.md'), history)
   writeFileSync(join(out, 'events.jsonl'), events.map(e => JSON.stringify(e)).join('\n') + '\n')
-  return { md, steps, events }
+  // What the mod hands the agent after a compaction: its system-prompt sections and the digest on the next prompt.
+  const dir = `~/.claude/session-state/${s.project}/${s.id.slice(0, 8)}`
+  const files = rankFiles(fileIndex(archivedTurns(events)), state, s.turns.length)
+  const injected = [pointerText(dir), ...systemTexts(state), digestText(state, stepLines(steps), files, dir, undefined, [], events)].filter(x => x !== '').join('\n\n')
+  writeFileSync(join(out, 'injected.md'), injected)
+  return { md, steps, events, injected, totals }
 }
 
 const PROBE_SYSTEM = [
@@ -109,39 +137,46 @@ const ANSWER_SYSTEM =
 const GRADE_SYSTEM =
   'Grade an answer against a reference answer. 5: correct and specific. 3: partly correct or missing a key detail. 1: vague or only related. 0: wrong, or says it does not know. Reply with JSON only: {"score": 0, "why": "<=15 words"}'
 
-const material = (c: Condition, summary: string, md: string, steps: string): string =>
+const material = (c: Condition, summary: string, md: string, steps: string, injected: string): string =>
   ({
     summary: `# Compaction summary\n${summary}`,
     ledger: `# state.md\n${md}\n\n# steps.md\n${steps}`,
     both: `# Compaction summary\n${summary}\n\n# state.md\n${md}\n\n# steps.md\n${steps}`,
+    after: `# Compaction summary\n${summary}\n\n# What the session ledger mod added\n${injected}`,
   })[c]
 
 type Row = { session: string; type: ProbeType; condition: Condition; score: number; question: string; why: string }
 
 const rows: Row[] = []
-const sizes: { session: string; turns: number; summary: number; ledger: number; notes: number }[] = []
+const sizes: { session: string; turns: number; summary: number; ledger: number; notes: number; calls: number; input: number; output: number; seconds: number }[] = []
 
-for (const file of FILES) {
+await pool(FILES, FILES.length, async file => {
   const id = file.slice(file.lastIndexOf('/') + 1, file.lastIndexOf('/') + 9)
-  const session = readSession(file, id)
+  const full = readSession(file, id)
+  const session = { ...full, turns: full.turns.filter(t => t.n <= MAX_TURNS) }
   const cwd = cwdOf(file)
   const out = join(DATA, 'probe', id)
   mkdirSync(out, { recursive: true })
   console.log(`${id}: ${session.turns.length} turns, replaying`)
-  const { md, steps } = await replay(session, cwd, out)
+  const { md, steps, injected, totals } = await replay(session, cwd, out)
 
   const chat = transcriptText(session, cwd)
-  const [probeText, summary] = await Promise.all([ask('sonnet', PROBE_SYSTEM, chat), ask('sonnet', SUMMARY_SYSTEM, chat)])
-  const probes = jsonIn<{ probes: Probe[] }>(probeText).probes.filter(p => (TYPES as readonly string[]).includes(p.type))
+  // The probes and the summary of a chat are written once and reused, so runs on different code answer the same questions.
+  const isSaved = existsSync(join(out, 'probes.json')) && existsSync(join(out, 'summary.md'))
+  const [probeText, summary] = isSaved
+    ? [readFileSync(join(out, 'probes.json'), 'utf8'), readFileSync(join(out, 'summary.md'), 'utf8')]
+    : await Promise.all([ask('sonnet', PROBE_SYSTEM, chat), ask('sonnet', SUMMARY_SYSTEM, chat)])
+  const parsed = jsonIn<{ probes: Probe[] } | Probe[]>(isSaved ? `{"probes": ${probeText}}` : probeText)
+  const probes = (Array.isArray(parsed) ? parsed : parsed.probes).filter(p => (TYPES as readonly string[]).includes(p.type))
   writeFileSync(join(out, 'probes.json'), JSON.stringify(probes, null, 2))
   writeFileSync(join(out, 'summary.md'), summary)
-  sizes.push({ session: id, turns: session.turns.length, summary: summary.length, ledger: md.length + steps.length, notes: (md.match(/^### [ML]-/gm) ?? []).length })
+  sizes.push({ session: id, turns: session.turns.length, summary: summary.length, ledger: md.length + steps.length, notes: (md.match(/^(?:### |- )[ML]-\d/gm) ?? []).length, calls: totals.calls, input: totals.usage.input + totals.usage.cacheRead + totals.usage.cacheWrite, output: totals.usage.output, seconds: totals.ms / 1000 })
   console.log(`  ${probes.length} probes; answering under ${CONDITIONS.length} conditions`)
 
   const jobs = probes.flatMap(p => CONDITIONS.map(c => ({ p, c })))
   await pool(jobs, 4, async ({ p, c }) => {
     try {
-      const answer = await ask('sonnet', ANSWER_SYSTEM, `${material(c, summary, md, steps)}\n\n# Question\n${p.question}`, 'low')
+      const answer = await ask('sonnet', ANSWER_SYSTEM, `${material(c, summary, md, steps, injected)}\n\n# Question\n${p.question}`, 'low')
       const grade = jsonIn<{ score: number; why: string }>(
         await ask('sonnet', GRADE_SYSTEM, `Question: ${p.question}\nReference: ${p.answer}\nAnswer: ${answer}`, 'low'),
       )
@@ -150,7 +185,7 @@ for (const file of FILES) {
       console.error(`  ${c} ${p.question.slice(0, 40)}: ${String(err).slice(0, 120)}`)
     }
   })
-}
+})
 
 // The folder the chat ran in, from the transcript, so paths show as the agent saw them.
 function cwdOf(file: string): string {
@@ -176,12 +211,16 @@ const lines = [
   ...TYPES.map(t => `| ${t} | ${CONDITIONS.map(c => cell(r => r.type === t && r.condition === c)).join(' | ')} |`),
   `| **all** | ${CONDITIONS.map(c => `**${cell(r => r.condition === c)}**`).join(' | ')} |`,
   '',
-  '| Session | Turns | Summary chars | Ledger chars | Notes and learnings |',
-  '| --- | --- | --- | --- | --- |',
-  ...sizes.map(s => `| ${s.session} | ${s.turns} | ${s.summary} | ${s.ledger} | ${s.notes} |`),
+  '| Session | Turns | Summary chars | Ledger chars | Notes and learnings | Haiku calls | Input tokens | Output tokens | Seconds |',
+  '| --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+  ...sizes.map(s => `| ${s.session} | ${s.turns} | ${s.summary} | ${s.ledger} | ${s.notes} | ${s.calls} | ${s.input} | ${s.output} | ${s.seconds.toFixed(1)} |`),
+  `| **Total** | ${sizes.reduce((n, s) => n + s.turns, 0)} | – | – | – | ${sizes.reduce((n, s) => n + s.calls, 0)} | ${sizes.reduce((n, s) => n + s.input, 0)} | ${sizes.reduce((n, s) => n + s.output, 0)} | ${sizes.reduce((n, s) => n + s.seconds, 0).toFixed(1)} |`,
   '',
+  'Haiku input includes cache reads and writes; seconds sum the CLI duration for replay and consolidation calls.',
   'summary: a Sonnet summary of the whole chat, a stand-in for /compact. ledger: state.md and steps.md from the replay.',
-  'both: what the agent has after a compaction with the mod on. The probes, references and grader are Sonnet; the',
+  'both: the summary plus state.md and steps.md whole. after: the summary plus exactly what the mod injects (its',
+  'system-prompt sections and the digest), which is what the agent has after a compaction if it reads no file.',
+  `Gate: ${config.gate}. Long chats are cut to their first ${MAX_TURNS === Infinity ? 'all' : MAX_TURNS} turns. The probes, references and grader are Sonnet; the`,
   'probe writer saw the full chat. Small sample: read the per-probe rows before trusting a difference.',
   '',
   'The per-probe questions quote the chats, so they stay in the git-ignored `eval/data/probe/PROBES-detail.md`.',
@@ -190,8 +229,8 @@ const lines = [
 const detail = [
   '# Per probe',
   '',
-  '| Session | Type | Question | summary | ledger | both |',
-  '| --- | --- | --- | --- | --- | --- |',
+  `| Session | Type | Question | ${CONDITIONS.join(' | ')} |`,
+  `| --- | --- | --- | ${CONDITIONS.map(() => '---').join(' | ')} |`,
   ...[...new Set(rows.map(r => `${r.session}\u0000${r.question}`))].map(k => {
     const [session, question] = k.split('\u0000')
     const of = (c: Condition) => rows.find(r => r.session === session && r.question === question && r.condition === c)
@@ -199,6 +238,6 @@ const detail = [
     return `| ${session} | ${type} | ${question!.replace(/\|/g, '/')} | ${CONDITIONS.map(c => of(c)?.score ?? '–').join(' | ')} |`
   }),
 ]
-writeFileSync(join(import.meta.dir, 'PROBES.md'), lines.join('\n') + '\n')
-writeFileSync(join(DATA, 'probe', 'PROBES-detail.md'), detail.join('\n') + '\n')
+writeFileSync(join(import.meta.dir, REPORT), lines.join('\n') + '\n')
+writeFileSync(join(DATA, 'probe', REPORT.replace(/\.md$/, '-detail.md')), detail.join('\n') + '\n')
 console.log(lines.slice(0, 12).join('\n'))

@@ -3,7 +3,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 import { parseTranscript } from '../core/transcript'
-import type { TurnFacts } from '../core/types'
+import type { TurnFacts, Usage } from '../core/types'
 
 export type EvalTurn = { n: number; user: string; answer: string; previousAnswer: string; facts?: TurnFacts }
 export type EvalSession = { id: string; project: string; turns: EvalTurn[] }
@@ -52,15 +52,16 @@ export const scoreFile = (model: string, view: 'prev' | 'none'): string => {
 export const clipText = (s: string, max: number): string => (s.length <= max ? s : `${s.slice(0, max)} [...]`)
 
 // One headless call on the Claude Code login (the subscription): no tools, no session saved.
-export const ask = async (model: string, system: string, prompt: string, effort = 'high'): Promise<string> => {
+export const ask = async (model: string, system: string, prompt: string, effort = 'high', onUsage?: (usage: Usage, ms: number) => void): Promise<string> => {
   const proc = Bun.spawn(
     ['claude', '-p', '--model', model, '--effort', effort, '--output-format', 'json', '--no-session-persistence', '--tools', '', '--disable-slash-commands', '--strict-mcp-config', '--system-prompt', system],
     { cwd: '/tmp', stdin: new Blob([prompt]), stdout: 'pipe', stderr: 'pipe' },
   )
   const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited])
-  if (code !== 0) throw new Error(`claude exited ${code}`)
-  const json = JSON.parse(out) as { result?: string; is_error?: boolean }
-  if (json.is_error === true || typeof json.result !== 'string') throw new Error(`claude error: ${out.slice(0, 200)}`)
+  let json: { result?: string; is_error?: boolean; duration_ms?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } }
+  try { json = JSON.parse(out) } catch { throw new Error(`claude exited ${code} without JSON`) }
+  onUsage?.({ input: json.usage?.input_tokens ?? 0, output: json.usage?.output_tokens ?? 0, cacheRead: json.usage?.cache_read_input_tokens ?? 0, cacheWrite: json.usage?.cache_creation_input_tokens ?? 0 }, json.duration_ms ?? 0)
+  if (code !== 0 || json.is_error === true || typeof json.result !== 'string') throw new Error(`claude error: ${out.slice(0, 200)}`)
   return json.result
 }
 

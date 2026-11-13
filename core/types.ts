@@ -19,6 +19,13 @@ export type Note = {
   status: 'active' | 'superseded' | 'done'
   supersededBy?: number
   doneAt?: number
+  // The session that sent the message the note came from, when it was not typed by the person.
+  via?: string
+  // The topic section of state.md the note sits in ("Unsorted" until a topic is given).
+  topic?: string
+  // How many times the person said it, and the last turn they did.
+  count?: number
+  lastTurn?: number
 }
 
 // Something the agent found out the hard way: an approach that failed, or a hard constraint.
@@ -31,6 +38,7 @@ export type Learning = {
   evidence: string
   status: 'active' | 'superseded'
   supersededBy?: number
+  topic?: string
 }
 
 // The ledger as state.md holds it: only what is true now. `roles` maps a file path to what it is for.
@@ -40,14 +48,19 @@ export type State = {
   learnings: Learning[]
   roles: Record<string, string>
   own: string[]
+  // The Now block: goal, current task, who the chat waits on, open asks. Rewritten every turn.
+  now: string
+  // Topic name to its one-line summary, in index order.
+  topics: Record<string, string>
 }
 
 // An item that left state.md, for history.md.
-export type Moved = { item: Note | Learning; reason: 'superseded' | 'done'; by?: number; turn: number }
+export type Moved = { item: Note | Learning; reason: 'superseded' | 'done' | 'merged' | 'dropped'; by?: number; turn: number; note?: string }
 
 export type Step = {
   turn: number
-  outcome: 'ok' | 'failed' | 'aborted'
+  // unrecorded: Haiku failed, so the turn has no notes yet; /session-state retry runs it again.
+  outcome: 'ok' | 'failed' | 'aborted' | 'unrecorded'
   text: string
   facts: string
   // Labels of what the turn added (M-012, L-003) and finished (M-009).
@@ -64,6 +77,8 @@ export type TurnFacts = {
   commands: number
   failures: Failure[]
   commits: string[]
+  // Calls to every other tool, by name; MCP tools by server.
+  tools: Record<string, number>
 }
 
 export type Turn = {
@@ -88,6 +103,7 @@ export type Memory = {
   quote: string
   refersTo: number[]
   supersedes: number[]
+  topic?: string
 }
 
 export type LearningDraft = { kind: LearnKind; text: string; why: string; evidence: string; replaces: number[] }
@@ -111,7 +127,7 @@ export const DEFAULTS: Config = {
   jevModel: 'jev-1.14',
   jevKey: '',
   haikuModel: 'claude-haiku-5-5',
-  effort: 'high',
+  effort: 'medium',
   maxWords: 15,
   auditRate: 0,
   pinRules: true,
@@ -128,7 +144,7 @@ export type PostResult = { status: number; text: string }
 export type Host = {
   now: () => Promise<number>
   random: () => number
-  complete: (req: { system: string; prompt: string; effort?: Config['effort'] }) => Promise<CompleteResult>
+  complete: (req: { system: string; prompt: string; effort?: Config['effort']; maxTokens?: number }) => Promise<CompleteResult>
   post: (url: string, headers: Record<string, string>, body: string) => Promise<PostResult>
 }
 
@@ -142,7 +158,7 @@ export type GateEvent = {
   ms: number
   inputTokens: number
   cost: number
-  action: 'extract' | 'skip' | 'audit' | 'error' | 'off'
+  action: 'extract' | 'always' | 'skip' | 'audit' | 'error' | 'off'
   error?: string
 }
 
@@ -154,6 +170,7 @@ export type ExtractEvent = {
   turnId: string
   model: string
   mode: 'summarize' | 'extract'
+  calls: number
   ms: number
   usage: Usage
   kept: number
@@ -161,6 +178,8 @@ export type ExtractEvent = {
   closed: number
   roles: number
   need?: number
+  // The topics the turn worked on.
+  topics?: string[]
   dropped: string[]
   error?: string
 }
@@ -176,4 +195,9 @@ export type TurnRecord = {
   facts: TurnFacts
 }
 
-export type LedgerEvent = GateEvent | ExtractEvent | TurnRecord
+export type CompactionEvent = { type: 'compaction'; at: number; turn: number }
+export type ConsolidateEvent = { type: 'consolidate'; at: number; turn: number; merged: number; superseded: number; done: number; dropped: number; skipped: number; topics: number; usage: Usage; error?: string }
+export type DigestEvent = { type: 'digest'; at: number; turn: number; length: number }
+export type ReadEvent = { type: 'read'; at: number; turn: number; tool: string; file: string }
+
+export type LedgerEvent = GateEvent | ExtractEvent | TurnRecord | CompactionEvent | ConsolidateEvent | DigestEvent | ReadEvent

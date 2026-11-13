@@ -27,6 +27,7 @@ export type ExtractEvent = {
   turnId: string
   model: string
   mode: 'summarize' | 'extract'
+  calls: number
   ms: number
   usage: Usage
   kept: number
@@ -40,7 +41,7 @@ export type ExtractEvent = {
 
 export type TurnRecord = { type: 'turn'; at: number; turn: number; turnId: string; user: string; answer: string; facts: TurnFacts }
 
-export type LedgerEvent = GateEvent | ExtractEvent | TurnRecord
+export type LedgerEvent = GateEvent | ExtractEvent | TurnRecord | { type: 'compaction'; at: number; turn: number } | { type: 'consolidate'; at: number; turn: number; merged: number; superseded: number; done: number; dropped: number; skipped: number; topics: number; usage: Usage; error?: string } | { type: 'digest'; at: number; turn: number; length: number } | { type: 'read'; at: number; turn: number; tool: string; file: string }
 
 export type PendingTurn = {
   turn: number
@@ -66,7 +67,12 @@ declare module 'claude-code' {
       steps: string
       history: string
       events: LedgerEvent[]
+      eventDirty: boolean
+      systemCurrent: [string, string]
+      systemSnapshot: [string, string]
+      recent: { turn: number; topics: string[] }[]
       queue: PendingTurn[]
+      consolidations: { folder: string; turn: number }[]
       failed: PendingTurn[]
       pendingUser: string
       previousAnswer: string
@@ -77,6 +83,7 @@ declare module 'claude-code' {
       isCompacted: boolean
       tab: Tab
       isHistoryShown: boolean
+      topicSent: Record<string, number>
     }
   }
 }
