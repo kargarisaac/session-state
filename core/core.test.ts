@@ -47,7 +47,7 @@ const memory = (text: string, quote: string, over: Partial<Memory> = {}): Memory
 
 const json = (body: object): CompleteResult => ({ isOk: true, text: JSON.stringify(body), usage: USAGE })
 
-const reply = (over: { memories?: object[]; step?: string; title?: string; done?: number[]; files?: object[]; learnings?: object[]; need?: number } = {}): CompleteResult =>
+const reply = (over: { memories?: object[]; step?: string; title?: string; done?: number[]; files?: object[]; learnings?: object[]; need?: number; need_topic?: string; topics?: string[]; restates?: object[]; now?: string } = {}): CompleteResult =>
   json({
     title: over.title ?? '',
     step: { text: over.step ?? 'Did the thing.', outcome: 'ok' },
@@ -56,6 +56,10 @@ const reply = (over: { memories?: object[]; step?: string; title?: string; done?
     learnings: over.learnings ?? [],
     memories: over.memories ?? [],
     ...(over.need === undefined ? {} : { need: over.need }),
+    ...(over.need_topic === undefined ? {} : { need_topic: over.need_topic }),
+    ...(over.topics === undefined ? {} : { topics: over.topics }),
+    ...(over.restates === undefined ? {} : { restates: over.restates }),
+    ...(over.now === undefined ? {} : { now: over.now }),
   })
 
 // A host whose Jev answer and Haiku replies are scripted; it records every Haiku request.
@@ -221,6 +225,7 @@ test('memory checks drop invented quotes, over-long notes and duplicates, and ti
   const checked = checkMemories(
     [
       memory('Use SQLite.', 'use SQLite', { supersedes: [1, 99], refersTo: [1, 5, 9], why: longWhy }),
+      memory('Use SQLite.', 'use SQLite'),
       memory('Invented thing.', 'never said this'),
       memory('Use Postgres.', 'Postgres'),
       memory('one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen', 'Keep it simple'),
@@ -230,7 +235,7 @@ test('memory checks drop invented quotes, over-long notes and duplicates, and ti
     15,
     5,
   )
-  expect(checked.kept.length).toBe(1)
+  expect(checked.kept.length).toBe(2)
   expect(checked.kept[0]!.supersedes).toEqual([1])
   expect(checked.kept[0]!.refersTo).toEqual([1])
   expect(wordCount(checked.kept[0]!.why)).toBe(60)
@@ -437,7 +442,7 @@ test('Haiku sees the ledger, recent steps, earlier user messages verbatim, the p
     files: [],
     turn: turn('yes, the second one', 13, { previousAnswer: 'Option one or option two?', facts: withFacts({ edited: [`${CWD}/x.ts`] }) }),
   })
-  expect(text).toContain('M-001 [decision] Use SQLite.')
+  expect(text).toContain('Unsorted M-001')
   expect(text).toContain('- t12 · ✓ · Did it.')
   expect(text).toContain('t12: message number 12')
   expect(text).toContain('t3: message number 3')
@@ -500,6 +505,58 @@ test('extraction may ask for one older turn, and answers again with it in view',
   expect(calls.requests[1]!.prompt).toContain('Turn t3, which you asked for:\nUser: For the deck, always use the dark theme.')
   expect(out.state.notes[0]!.source.refersTo).toEqual([3])
   expect(out.events[1]).toMatchObject({ need: 3, kept: 1 })
+})
+
+test('a restated note is counted once only when the quote is in the message', async () => {
+  const state = applyMemories(fresh(), [memory('Ask before paid runs.', 'ask before any paid run', { kind: 'requirement', topic: 'Spend' })], 1, '', '').state
+  const { host } = fakeHost(0.95, [reply({ restates: [{ id: 'M-001', quote: 'ask before any paid run' }, { id: 1, quote: 'ask before any paid run' }, { id: 99, quote: 'made up' }] })])
+  const out = await processTurn(host, config(), ledgerOf(state), turn('Please ask before any paid run.', 2))
+  expect(out.state.notes.length).toBe(1)
+  expect(out.state.notes[0]).toMatchObject({ id: 1, count: 2, lastTurn: 2 })
+  const invalid = fakeHost(0.95, [reply({ restates: [{ id: 1, quote: 'never said this' }] })])
+  const next = await processTurn(invalid.host, config(), ledgerOf(out.state), turn('Something else.', 3))
+  expect(next.state.notes[0]!.count).toBe(2)
+})
+
+test('matching quotes count as a repeat while a replacement moves the old note', async () => {
+  const state = applyMemories(fresh(), [memory('Ask before paid runs.', 'please ask before any paid run', { kind: 'requirement', topic: 'Spend' })], 1, '', '').state
+  const { host } = fakeHost(0.95, [reply({ memories: [{ kind: 'requirement', topic: 'Spend', text: 'Ask before paid runs.', quote: 'ask before any paid run' }] })])
+  const out = await processTurn(host, config(), ledgerOf(state), turn('Always ask before any paid run.', 2))
+  expect(out.state.notes.length).toBe(1)
+  expect(out.state.notes[0]).toMatchObject({ id: 1, count: 2, lastTurn: 2 })
+  expect(out.step.added).toEqual([])
+  const other = fakeHost(0.95, [reply({ memories: [{ kind: 'requirement', topic: 'Travel', text: 'Ask before travel spending.', quote: 'ask before any paid run' }] })])
+  const separate = await processTurn(other.host, config(), ledgerOf(out.state), turn('Please ask before any paid run.', 3))
+  expect(separate.state.notes).toHaveLength(2)
+  const changed = fakeHost(0.95, [reply({ memories: [{ kind: 'requirement', topic: 'Spend', text: 'Never run paid jobs.', quote: 'never run paid jobs', supersedes: [1] }] })])
+  const next = await processTurn(changed.host, config(), ledgerOf(out.state), turn('Instead, never run paid jobs.', 3))
+  expect(next.state.notes).toHaveLength(1)
+  expect(next.state.notes[0]).toMatchObject({ id: 2, topic: 'Spend', count: 1, lastTurn: 3 })
+  expect(next.moved[0]).toMatchObject({ reason: 'superseded', by: 2 })
+})
+
+test('recent topics are shown and one more topic can be requested', async () => {
+  const state = applyMemories(fresh(), [memory('Use SQLite.', 'use SQLite', { topic: 'Storage' }), memory('Ask before paid runs.', 'ask before paid runs', { topic: 'Spend' })], 1, '', '').state
+  const first = fakeHost(0.95, [reply({ topics: ['Storage'] })])
+  const recorded = await processTurn(first.host, config(), ledgerOf(state), turn('storage work', 2))
+  const { host, calls } = fakeHost(0.95, [reply({ need_topic: 'Spend' }), reply({ topics: ['Storage', 'Spend'] })])
+  const out = await processTurn(host, config(), ledgerOf(state, { events: recorded.events }), turn('check the spend rule', 3))
+  expect(calls.complete).toBe(2)
+  expect(calls.requests[0]!.prompt).toContain('## Storage\n')
+  expect(calls.requests[0]!.prompt.includes('## Spend\n')).toBe(false)
+  expect(calls.requests[1]!.prompt).toContain('## Spend\n- M-002')
+  expect(out.events[1]).toMatchObject({ topics: ['Storage', 'Spend'] })
+})
+
+test('summarize updates Now and clips it to fifteen lines', async () => {
+  const lines = Array.from({ length: 18 }, (_, i) => `Line ${i + 1}`)
+  const { host, calls } = fakeHost(0.2, [reply({ now: lines.join('\n') })])
+  const out = await processTurn(host, config(), ledgerOf({ ...fresh(), now: 'Old goal' }), turn('run tests', 2))
+  expect(calls.requests[0]!.prompt).toContain('Old goal')
+  expect(out.state.now).toBe(lines.slice(0, 15).join('\n'))
+  const noNow = fakeHost(0.2, [reply()])
+  const next = await processTurn(noNow.host, config(), ledgerOf(out.state), turn('okay', 3))
+  expect(next.state.now).toBe(out.state.now)
 })
 
 test('an over-long note is asked again once and the short version is kept', async () => {

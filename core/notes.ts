@@ -1,4 +1,5 @@
 import { KINDS } from './types'
+import { topicOf } from './state'
 import type { Kind, Memory, Moved, Note, State } from './types'
 
 export const activeNotes = (state: State): Note[] => state.notes.filter(n => n.status === 'active')
@@ -39,6 +40,18 @@ export const newFront = (f: SessionFacts): Record<string, string> => ({
   next_learning: '1',
 })
 
+const repeatOf = (m: Memory, notes: Note[], via?: string): Note | undefined => {
+  const words = (s: string) => [...new Set(s.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [])]
+  const a = words(m.quote)
+  return notes.find(n => {
+    if (n.status !== 'active' || n.kind !== m.kind || n.via !== via || topicOf(n) !== topicOf(m)) return false
+    const b = words(n.quote)
+    if (m.quote.trim().length < 3 || n.quote.trim().length < 3 || a.length === 0 || b.length === 0) return false
+    // Four fifths of both quotes must match, so a short shared phrase alone cannot merge two rules.
+    return a.filter(w => b.includes(w)).length / Math.max(a.length, b.length) >= 0.8
+  })
+}
+
 // New notes get the next id; a note that replaces or finishes another moves the old one out of the state.
 export const applyMemories = (
   state: State,
@@ -48,11 +61,26 @@ export const applyMemories = (
   title: string,
   done: number[] = [],
   via?: string,
+  restates: number[] = [],
 ): { state: State; moved: Moved[] } => {
   let next = Math.max(Number(state.front.next_id) || 1, state.notes.reduce((top, n) => Math.max(top, n.id + 1), 1))
   let notes = [...state.notes]
   const moved: Moved[] = []
+  const repeated = new Set<number>()
+  const mark = (id: number) => {
+    if (repeated.has(id)) return
+    repeated.add(id)
+    notes = notes.map(n => n.id === id && n.status === 'active' && n.via === via
+      ? { ...n, count: (n.count ?? 1) + 1, lastTurn: turn }
+      : n)
+  }
+  for (const id of restates) mark(id)
   for (const m of memories) {
+    const repeat = m.supersedes.length === 0 ? repeatOf(m, notes, via) : undefined
+    if (repeat !== undefined) {
+      mark(repeat.id)
+      continue
+    }
     const id = next++
     for (const old of notes.filter(n => m.supersedes.includes(n.id))) moved.push({ item: old, reason: 'superseded', by: id, turn })
     notes = notes.filter(n => !m.supersedes.includes(n.id))
@@ -66,6 +94,7 @@ export const applyMemories = (
       quote: m.quote,
       source: { turnId, refersTo: m.refersTo },
       status: 'active',
+      ...(m.topic === undefined ? {} : { topic: m.topic, count: 1, lastTurn: turn }),
       ...(via === undefined ? {} : { via }),
     })
   }

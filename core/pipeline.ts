@@ -1,16 +1,17 @@
 import { contextText } from './context'
 import type { TurnContext } from './context'
-import { checkDone, checkFileRoles, checkLearnings, checkMemories, checkStep, parseExtraction, systemPrompt } from './extract'
+import { checkDone, checkFileRoles, checkLearnings, checkMemories, checkStep, isQuoteOf, parseExtraction, systemPrompt } from './extract'
 import type { Extraction, Mode } from './extract'
 import { factsText } from './facts'
 import { runGate } from './gate'
-import { addUsage, emptyUsage } from './ledger'
+import { addUsage, emptyUsage, recentTopics } from './ledger'
 import { activeNotes, applyMemories, openAsks } from './notes'
-import { applyFileRoles, applyLearnings, learnLabel, noteLabel } from './state'
+import { applyFileRoles, applyLearnings, learnLabel, noteLabel, topicNames } from './state'
+import { redact } from './redact'
 import { viaOf } from './transcript'
 import type { CompleteResult, Config, ExtractEvent, FileEntry, Host, LedgerEvent, Moved, State, Step, Turn, TurnRecord } from './types'
 
-export type Ledger = { state: State; steps: readonly string[]; archive: readonly TurnRecord[]; files: readonly FileEntry[] }
+export type Ledger = { state: State; steps: readonly string[]; archive: readonly TurnRecord[]; files: readonly FileEntry[]; events?: readonly LedgerEvent[] }
 
 export type Outcome = { state: State; moved: Moved[]; step: Step; events: LedgerEvent[] }
 
@@ -25,7 +26,8 @@ export const processTurn = async (host: Host, config: Config, ledger: Ledger, tu
   const { state } = ledger
   const cwd = state.front.cwd ?? ''
   const earlier = ledger.archive.filter(r => r.turn < turn.turn)
-  const base: TurnContext = { state, steps: ledger.steps, earlier, files: ledger.files, turn }
+  const events = (ledger.events ?? []).filter(e => e.type !== 'extract' || e.turn < turn.turn)
+  const base: TurnContext = { state, steps: ledger.steps, earlier, files: ledger.files, turn, topics: recentTopics(events, 3).filter(t => topicNames(state).includes(t)) }
   const system = systemPrompt(mode, config.maxWords)
   const effort = mode === 'extract' ? config.effort : 'low'
   const start = await host.now()
@@ -60,8 +62,9 @@ export const processTurn = async (host: Host, config: Config, ledger: Ledger, tu
   // One look further back, only when Haiku names an archived turn it was not shown in full.
   const need = mode === 'extract' ? got?.need : undefined
   const looked = need === undefined ? undefined : earlier.find(r => r.turn === need)
-  if (looked !== undefined) {
-    context = { ...base, looked }
+  const needTopic = mode === 'extract' && got?.needTopic !== undefined && topicNames(state).includes(got.needTopic) && !base.topics?.includes(got.needTopic) ? got.needTopic : undefined
+  if (looked !== undefined || needTopic !== undefined) {
+    context = { ...base, looked, topics: needTopic === undefined ? base.topics : [...(base.topics ?? []), needTopic] }
     got = (await ask(contextText(context))) ?? got
   }
 
@@ -86,9 +89,11 @@ export const processTurn = async (host: Host, config: Config, ledger: Ledger, tu
   dropped.push(...learned.dropped)
   const roles = got === undefined ? [] : checkFileRoles(got.files, turn.facts.edited, cwd)
 
-  const notes = applyMemories(state, memories?.kept ?? [], turn.turn, turn.turnId, got?.title ?? '', done, viaOf(turn.user))
+  const restates = mode === 'extract' ? (got?.restates ?? []).filter(r => isQuoteOf(r.quote, turn.user) || isQuoteOf(r.quote, redact(turn.user))).map(r => r.id) : []
+  const notes = applyMemories(state, memories?.kept ?? [], turn.turn, turn.turnId, got?.title ?? '', done, viaOf(turn.user), restates)
   const withLearnings = applyLearnings(notes.state, learned.kept, turn.turn)
-  const next = applyFileRoles(withLearnings.state, roles)
+  const withRoles = applyFileRoles(withLearnings.state, roles)
+  const next = got?.now === undefined ? withRoles : { ...withRoles, now: got.now }
   const moved = [...notes.moved, ...withLearnings.moved]
 
   const firstNote = Number(state.front.next_id) || 1
@@ -119,6 +124,7 @@ export const processTurn = async (host: Host, config: Config, ledger: Ledger, tu
     closed: done.length,
     roles: roles.length,
     ...(looked === undefined ? {} : { need: looked.turn }),
+    ...(got === undefined ? {} : { topics: got.topics }),
     dropped,
     ...(got === undefined ? { error: failure } : {}),
   }
