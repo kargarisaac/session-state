@@ -66,6 +66,10 @@ declare module 'claude-code' {
       steps: string
       history: string
       events: LedgerEvent[]
+      eventDirty: boolean
+      systemCurrent: [string, string]
+      systemSnapshot: [string, string]
+      recent: { turn: number; topics: string[] }[]
       queue: PendingTurn[]
       consolidations: { folder: string; turn: number }[]
       failed: PendingTurn[]

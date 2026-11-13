@@ -46,7 +46,7 @@ const world = (
   const stall = { until: undefined as Promise<void> | undefined }
   // `hang.jev` makes OpenRouter take the request and never answer it.
   const hang = { jev: false }
-  const calls = { jev: 0, haiku: 0, efforts: [] as string[], contexts: [] as (readonly string[] | undefined)[], isDropping: false }
+  const calls = { jev: 0, haiku: 0, efforts: [] as string[], contexts: [] as (readonly string[] | undefined)[], reads: [] as string[], isDropping: false }
   let replyIndex = 0
   // A read of a path waits for its hold and then answers what the file held when it was asked; Haiku waits for its
   // hold, and fails its next `fails` calls.
@@ -75,6 +75,7 @@ const world = (
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
   on('ui.close', () => ({ value: undefined }) as never)
   on('fs.read', async (_$, e) => {
+    calls.reads.push(e.path)
     const text = files.get(e.path)
     const hold = holds.reads.get(e.path)
     holds.reads.delete(e.path)
@@ -298,6 +299,7 @@ test('after Claude Code compacts, the next typed prompt carries the ledger diges
   expect(withDigest?.[0]).toContain('M-001 (t1) Use SQLite for storage.')
   expect(withDigest?.[0]).toContain(`Full ledger: ${FOLDER}/state.md`)
   expect(after ?? []).toEqual([])
+  await clock.advance(10)
   const logged = (files.get(EVENTS) ?? '').trim().split('\n').map(line => JSON.parse(line))
   expect(logged.filter(e => e.type === 'compaction')).toEqual([{ type: 'compaction', at: NOW + 10, turn: 1 }])
   expect(logged.filter(e => e.type === 'digest')).toEqual([{ type: 'digest', at: NOW + 10, turn: 2, length: withDigest?.[0]?.length }])
@@ -307,7 +309,7 @@ test('after Claude Code compacts, the next typed prompt carries the ledger diges
 })
 
 test('ledger reads by the main agent are logged with the turn and subagent reads are not', async ($, on) => {
-  mock.clock(on, { now: NOW })
+  const clock = mock.clock(on, { now: NOW })
   const { files } = world(on, 0.95, [])
   await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
   await $.prompt.submit({ text: 'check the ledger' } as never)
@@ -317,6 +319,8 @@ test('ledger reads by the main agent are logged with the turn and subagent reads
   await $.tool.call({ tool: 'Grep', path: `${FOLDER}/history.md`, pattern: 'SQLite', tool_use_id: 'r4' } as never)
   await $.tool.call({ tool: 'Bash', command: `rg SQLite ${FOLDER}`, tool_use_id: 'r5' } as never)
   await $.tool.call({ tool: 'Grep', path: `${FOLDER}-other/state.md`, pattern: 'SQLite', tool_use_id: 'r6' } as never)
+  expect(files.has(EVENTS)).toBe(false)
+  await clock.advance(10)
   const logged = (files.get(EVENTS) ?? '').trim().split('\n').map(line => JSON.parse(line))
   expect(logged.filter(e => e.type === 'read')).toEqual([
     { type: 'read', at: NOW, turn: 1, tool: 'Read', file: 'state.md' },
@@ -410,6 +414,14 @@ test('entering a worktree mid-chat does not change the project, folder or transc
 const TRANSCRIPT = `/h/.claude/projects/-work-demo/${ID}.jsonl`
 const typed = (uuid: string, text: string) => JSON.stringify({ type: 'user', uuid, message: { content: text } })
 const replied = (text: string) => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } })
+
+test('boot skips the transcript when the ledger has events', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const { files, calls } = world(on, 0.95, [])
+  files.set(EVENTS, turnLine(1, []))
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  expect(calls.reads.includes(TRANSCRIPT)).toBe(false)
+})
 
 test('a chat met mid-way is read back from its transcript, so steps and turn numbers start at the beginning', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
@@ -997,6 +1009,25 @@ test('steps.md and history.md edited on disk show in the panel', async ($, on) =
   expect(await markdownOf(ui)).toContain('Edited by hand.')
 })
 
+test('panel polling skips unchanged files and picks up a hand edit', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, calls } = world(on, 0.95, [])
+  files.set(STATE, DISK_STATE)
+  files.set(STEPS, DISK_STEPS)
+  files.set(EVENTS, DISK_EVENTS)
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await $.command.run({ command: 'session-state', args: 'ledger' } as never)
+  const ui = await mountPane($)
+  await clock.advance(3000)
+  const reads = calls.reads.filter(path => path === STATE || path === STEPS).length
+  await clock.advance(3000)
+  expect(calls.reads.filter(path => path === STATE || path === STEPS).length).toBe(reads)
+  files.set(STATE, `${DISK_STATE}\nHand edit.\n`)
+  await clock.advance(3000)
+  expect(calls.reads.filter(path => path === STATE).length).toBeGreaterThan(1)
+  expect(await markdownOf(ui)).toContain('Hand edit.')
+})
+
 test('a poll that read state.md before a turn wrote it does not put the old text back', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   const { files, holds } = world(on, 0.95, [SQLITE, POSTGRES])
@@ -1348,7 +1379,7 @@ test('the reminders the app wraps around a typed message are not part of what th
 })
 
 test('a typed prompt that something beneath drops does not use up the digest', async ($, on) => {
-  const { calls, files } = await recorded($, on)
+  const { calls, files, clock } = await recorded($, on)
   await $.session.compact(COMPACT)
   calls.isDropping = true
   const dropped = await $.prompt.submit({ text: 'what next?' } as never)
@@ -1357,6 +1388,7 @@ test('a typed prompt that something beneath drops does not use up the digest', a
 
   expect(dropped.drop).toBe('blocked')
   expect(digestOn(calls.contexts)).toContain('The chat was just compacted.')
+  await clock.advance(10)
   expect((files.get(EVENTS) ?? '').split('"type":"digest"').length - 1).toBe(1)
 })
 
@@ -1531,10 +1563,9 @@ test('the pointer reads the same on every request; the rules change only when a 
   }
 
   expect(new Set(seen.map(s => s.pointer)).size).toBe(1)
-  expect(seen.map(s => s.rules === '')).toEqual([true, true, true, false, false])
-  expect(seen[3]?.rules).toContain('- Never use Opus as a subagent.')
-  expect(seen[4]?.rules).toBe(seen[3]?.rules)
-  expect(seen[3]?.rules.includes('Use SQLite') || seen[3]?.rules.includes('Rename')).toBe(false)
+  expect(seen.map(s => s.rules === '')).toEqual([true, true, true, true, false])
+  expect(seen[4]?.rules).toContain('- Never use Opus as a subagent.')
+  expect(seen[4]?.rules.includes('Use SQLite') || seen[4]?.rules.includes('Rename')).toBe(false)
 })
 
 test('with pinRules off the system prompt carries the pointer and no rules', { options: { pinRules: false } }, async ($, on) => {
@@ -1568,6 +1599,7 @@ test('a rule is one line in the system prompt, whatever the person\'s words hold
   await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
   await say($, 'Always reply in French please.', 'ok', 1)
   await settle(clock, files, f => f.has(STEPS))
+  await $.prompt.submit({ text: 'Continue.' } as never)
   const rules = (await $.prompt.compose(COMPOSE)).sections.find(s => s.id === 'session-state:rules')
 
   expect(rules?.text.split('\n').length).toBe(2)
@@ -1716,6 +1748,16 @@ test('a queued turn that was fully recorded before the process stopped is not re
   expect(calls.haiku).toBe(0)
   expect(files.get(STATE)).toBe(RECORDED_STATE)
   expect(files.get(`${FOLDER}/pending.json`)).toBe('[]')
+})
+
+test('a pending turn missing from the archive is restored after a restart', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.95, [SQLITE])
+  files.set(`${FOLDER}/pending.json`, JSON.stringify([pendingTurn(1, 'Please use SQLite from now on.', 'Done')]))
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await settle(clock, files, f => f.get(`${FOLDER}/pending.json`) === '[]')
+  const events = (files.get(EVENTS) ?? '').trim().split('\n').map(line => JSON.parse(line))
+  expect(events.filter(e => e.type === 'turn').map(e => e.user)).toEqual(['Please use SQLite from now on.'])
 })
 
 test('a queued turn whose last run failed is recorded when it is picked up again', async ($, on) => {
@@ -2152,6 +2194,32 @@ test('system prompt bytes stay the same across turns without topic or core rule 
   await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t2'))
   const second = await $.prompt.compose(COMPOSE)
   expect(JSON.stringify(second.sections)).toBe(JSON.stringify(first.sections))
+})
+
+test('a turn keeps its system text while the ledger changes and a new note leaves the index stable', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files } = world(on, 0.95, [
+    said('decision', 'Use Postgres.', 'use Postgres'),
+    said('correction', 'Never push.', 'never push'),
+  ])
+  files.set(STATE, stateMd([noteMd(1, 'decision', 'Use SQLite.', '', 'SQLite')]))
+  files.set(EVENTS, turnLine(1, []))
+  await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
+  await $.prompt.submit({ text: 'Please use Postgres.' } as never)
+  const first = await $.prompt.compose(COMPOSE)
+  await $.turn.complete({ turnId: 't2', answer: 'Done.', durationMs: 10, isAborted: false } as never)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t2'))
+  expect(files.get(STATE) ?? '').toContain('Use Postgres.')
+  expect(JSON.stringify((await $.prompt.compose(COMPOSE)).sections)).toBe(JSON.stringify(first.sections))
+  await $.prompt.submit({ text: 'Please never push.' } as never)
+  const next = await $.prompt.compose(COMPOSE)
+  expect(JSON.stringify(next.sections)).toBe(JSON.stringify(first.sections))
+  expect(next.sections.find(s => s.id === 'session-state:topics')?.text).toBe('Topic index:\n- Unsorted')
+  await $.turn.complete({ turnId: 't3', answer: 'Done.', durationMs: 10, isAborted: false } as never)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t3'))
+  expect(JSON.stringify((await $.prompt.compose(COMPOSE)).sections)).toBe(JSON.stringify(next.sections))
+  await $.prompt.submit({ text: 'Continue.' } as never)
+  expect((await $.prompt.compose(COMPOSE)).sections.find(s => s.id === 'session-state:rules')?.text).toContain('Never push.')
 })
 
 test('a topic section goes to a typed prompt once in five turns and again after that', async ($, on) => {

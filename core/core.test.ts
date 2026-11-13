@@ -8,7 +8,7 @@ import { addToolCall, emptyFacts, factsText } from './facts'
 import { fileIndex, rankFiles } from './files'
 import { gateState, parseGate } from './gate'
 import { archivedTurns, emptyUsage, fitLedger, haikuCost, parseLedger, parsePending, recentTopics, serializeLedger, serializePending, summarize, turnRecord } from './ledger'
-import { activeNotes, applyMemories, newFront, openAsks, parseOldNotes, pointerText, rulesText, upsertIndex } from './notes'
+import { activeNotes, applyMemories, newFront, openAsks, parseOldNotes, pointerText, rulesText, systemTexts, upsertIndex } from './notes'
 import { processTurn } from './pipeline'
 import type { Ledger } from './pipeline'
 import { clip, redact } from './redact'
@@ -846,6 +846,7 @@ test('topic helpers: index in order with note ids, one section per topic, recent
   })
   const state = { ...base, topics: { PRs: 'Isaac merges.' }, notes: [note(1, 'PRs', 3), note(2, undefined), note(3, 'PRs')] }
   expect(topicIndex(state)).toBe('- PRs: Isaac merges. M-001 M-003\n- Unsorted M-002')
+  expect(systemTexts(state)[0]).toBe('Topic index:\n- PRs: Isaac merges.\n- Unsorted')
   expect(topicSection(state, 'PRs')).toBe('## PRs\n- M-001 · requirement · Rule 1. "rule 1" (t1, said 3 times)\n  Why: Because.\n- M-003 · requirement · Rule 3. "rule 3" (t3)\n  Why: Because.')
   const ev = (turn: number, topics: string[]) => ({ type: 'extract' as const, at: 0, turn, turnId: `t${turn}`, model: 'h', mode: 'extract' as const, ms: 0, usage: emptyUsage(), kept: 0, learned: 0, closed: 0, roles: 0, dropped: [], topics })
   expect(recentTopics([ev(1, ['Old']), ev(5, ['A']), ev(6, ['B', 'A'])], 3)).toEqual(['B', 'A'])
