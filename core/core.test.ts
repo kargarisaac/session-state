@@ -7,7 +7,7 @@ import { addToolCall, emptyFacts, factsText } from './facts'
 import { fileIndex, rankFiles } from './files'
 import { gateState, parseGate } from './gate'
 import { archivedTurns, emptyUsage, fitLedger, haikuCost, parseLedger, parsePending, recentTopics, serializeLedger, serializePending, summarize, turnRecord } from './ledger'
-import { activeNotes, applyMemories, newFront, openAsks, parseOldNotes, rulesText, upsertIndex } from './notes'
+import { activeNotes, applyMemories, newFront, openAsks, parseOldNotes, pointerText, rulesText, upsertIndex } from './notes'
 import { processTurn } from './pipeline'
 import type { Ledger } from './pipeline'
 import { clip, redact } from './redact'
@@ -745,16 +745,37 @@ test('a full ledger gives up the words of its oldest turns first, then its oldes
   expect(tiny[0]).toMatchObject({ type: 'turn', turn: 40 - tiny.length + 1 })
 })
 
-test('the rules for the system prompt are only requirements and preferences, newest eight', async () => {
-  expect(rulesText(fresh())).toBe('')
-  const rules = Array.from({ length: 10 }, (_, i) => memory(`Rule ${i + 1}.`, 'q', { kind: 'requirement' }))
-  const { state } = applyMemories(fresh(), [...rules, memory('Use SQLite.', 'q'), memory('Rename it.', 'q', { kind: 'ask' }), memory('Short answers.', 'q', { kind: 'preference' })], 1, '', '')
-  const text = rulesText(state)
-  expect(text).toContain('- Short answers.')
-  expect(text).toContain('- Rule 10.')
-  expect(text.includes('- Rule 3.')).toBe(false)
-  expect(text.includes('Use SQLite')).toBe(false)
-  expect(text).toContain('3 older rules are in state.md')
+test('the pointer names the ledger layout and how to search it', () => {
+  const text = pointerText('/ledger')
+  for (const part of ['/ledger/', 'Now', 'topic index', '## <topic>', 'M-012', 'Grep state.md', 'grep events.jsonl', 'exact past words']) expect(text).toContain(part)
+})
+
+test('core rules are corrections and repeated user rules, newest first within the cap', () => {
+  const notes = applyMemories(fresh(), [
+    memory('Old rule ' + 'x'.repeat(80), 'q', { kind: 'requirement' }),
+    memory('Once only', 'q', { kind: 'preference' }),
+    memory('Repeated rule', 'q', { kind: 'preference' }),
+    memory('A correction', 'q', { kind: 'correction' }),
+    memory('Relayed correction', 'q', { kind: 'correction' }),
+  ], 1, '', '').state.notes.map((n, i) => ({ ...n, turn: i + 1, count: i === 0 || i === 2 ? 2 : 1, ...(i === 4 ? { via: 'Lead' } : {}) }))
+  const text = rulesText({ ...fresh(), notes }, 130)
+  expect(text.indexOf('A correction')).toBeLessThan(text.indexOf('Repeated rule'))
+  expect(text).toContain('1 more in state.md')
+  expect(text.includes('Once only') || text.includes('Relayed correction') || text.includes('Old rule')).toBe(false)
+  expect(text.length).toBeLessThanOrEqual(130)
+})
+
+test('the digest puts unrecorded turns, Now, index, steps and current topics first', () => {
+  const base = applyMemories(fresh(), [memory('Use SQLite', 'SQLite', { kind: 'decision' }), memory('Finish tests', 'tests', { kind: 'ask' }), memory('No pushes', 'pushes', { kind: 'correction' })], 1, '', '').state
+  const state = { ...base, now: 'Goal: ship', topics: { Storage: 'SQLite' }, notes: base.notes.map((n, i) => ({ ...n, topic: i === 0 ? 'Storage' : 'Other' })) }
+  const event = { type: 'extract' as const, at: 0, turn: 1, turnId: 't1', model: 'h', mode: 'extract' as const, ms: 0, usage: emptyUsage(), kept: 0, learned: 0, closed: 0, roles: 0, dropped: [], topics: ['Storage'] }
+  const text = digestText(state, ['- t1 · step'], [], '/ledger', 8000, [{ turn: 2, user: 'still recording' }], [event])
+  const parts = ['Not in the ledger yet', '## Now', '## Topic index', '## Recent steps', '## Storage', '## Open asks', '## Rules and corrections']
+  for (let i = 1; i < parts.length; i++) expect(text.indexOf(parts[i - 1]!)).toBeLessThan(text.indexOf(parts[i]!))
+  expect(text).toContain('Goal: ship')
+  expect(text).toContain('Use SQLite')
+  expect(text.match(/Use SQLite/g)?.length).toBe(1)
+  expect(text.length).toBeLessThanOrEqual(8000)
 })
 
 test('the index keeps one row per session folder, newest first', async () => {

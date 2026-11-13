@@ -110,27 +110,35 @@ export const applyMemories = (
 // What the agent is told about the ledger. It must read the same on every request of a session, so the
 // prompt cache is written once: no counts, no times, only the folder.
 export const pointerText = (dir: string): string =>
-  `Session ledger: a tool keeps a ledger of this conversation in ${dir}/. ` +
-  'state.md holds what is true now: the user\'s open asks, their decisions and rules with the reason and their exact words, ' +
-  'what was learned the hard way, and the files that matter with their roles. steps.md has one line per turn; history.md has ' +
-  'replaced and finished items. The files may not exist until the first turn is recorded. Read state.md when you need to ' +
-  'recall what the user asked or decided or which files matter, after a compaction, or when you are unsure which decision is ' +
-  'current. Do not edit these files; they are maintained automatically.'
+  `Session ledger: a tool keeps the state of this conversation in ${dir}/. ` +
+  'state.md has a Now block, a topic index, and one ## <topic> section per topic. ' +
+  'Notes have permanent ids such as M-012. Grep state.md for a topic heading or id; ' +
+  "grep events.jsonl for the user's exact past words. steps.md records each turn and history.md holds past notes. " +
+  'The files may not exist until the first turn is recorded. Do not edit them; they are maintained automatically.'
 
-const MAX_RULES = 8
-
-// The few rules that must hold all chat long, for the system prompt. Empty when the person has none.
-export const rulesText = (state: State): string => {
-  // A rule another session relayed is not the person's own word, so it is not pinned.
-  const rules = activeNotes(state).filter(n => (n.kind === 'requirement' || n.kind === 'preference') && n.via === undefined)
+// The rules that must hold for the whole chat, newest first.
+export const rulesText = (state: State, cap = 3000): string => {
+  const rules = activeNotes(state)
+    .filter(n => n.via === undefined && (n.kind === 'correction' || ((n.kind === 'requirement' || n.kind === 'preference') && (n.count ?? 1) >= 2)))
+    .sort((a, b) => (b.lastTurn ?? b.turn) - (a.lastTurn ?? a.turn) || b.id - a.id)
   if (rules.length === 0) return ''
-  const shown = rules.slice(-MAX_RULES)
-  const older = rules.length - shown.length
-  return [
-    'Standing rules the user gave in this conversation, from the session ledger. They still apply:',
-    ...shown.map(r => `- ${r.text}`),
-    ...(older > 0 ? [`(${older} older rule${older === 1 ? ' is' : 's are'} in state.md.)`] : []),
-  ].join('\n')
+  const head = 'Core rules the user gave in this conversation:'
+  const shown: string[] = []
+  for (const rule of rules) {
+    const line = `- ${rule.text.replace(/\s+/g, ' ').trim()}`
+    const left = rules.length - shown.length - 1
+    const tail = left > 0 ? `\n(${left} more in state.md.)` : ''
+    if ([head, ...shown, line].join('\n').length + tail.length > cap) {
+      if (shown.length === 0) {
+        const room = cap - head.length - tail.length - 2
+        if (room > 3) shown.push(`${line.slice(0, room - 1).replace(/[\uD800-\uDBFF]$/, '')}…`)
+      }
+      break
+    }
+    shown.push(line)
+  }
+  const left = rules.length - shown.length
+  return [head, ...shown, ...(left > 0 ? [`(${left} more in state.md.)`] : [])].join('\n')
 }
 
 export type IndexRow = { file: string; date: string; title: string; active: number; learned: number; steps: number }

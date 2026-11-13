@@ -77,6 +77,7 @@ declare module 'claude-code' {
       isCompacted: boolean
       tab: Tab
       isHistoryShown: boolean
+      topicSent: Record<string, number>
     }
   }
 }
