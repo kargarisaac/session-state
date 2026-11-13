@@ -99,7 +99,7 @@ export const processTurn = async (host: Host, config: Config, ledger: Ledger, tu
   ]
   const step: Step = {
     turn: turn.turn,
-    outcome: turn.isAborted ? 'aborted' : (got?.step.outcome ?? 'ok'),
+    outcome: turn.isAborted ? 'aborted' : got === undefined ? 'unrecorded' : got.step.outcome,
     text: checkStep(got?.step.text ?? '', turn.user),
     facts: factsText(turn.facts, cwd),
     added,

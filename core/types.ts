@@ -49,7 +49,8 @@ export type Moved = { item: Note | Learning; reason: 'superseded' | 'done'; by?:
 
 export type Step = {
   turn: number
-  outcome: 'ok' | 'failed' | 'aborted'
+  // unrecorded: Haiku failed, so the turn has no notes yet; /session-state retry runs it again.
+  outcome: 'ok' | 'failed' | 'aborted' | 'unrecorded'
   text: string
   facts: string
   // Labels of what the turn added (M-012, L-003) and finished (M-009).

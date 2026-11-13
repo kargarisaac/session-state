@@ -527,6 +527,13 @@ test('Haiku failing twice keeps the state, records the error, and the step falls
   expect(out.events[1]).toMatchObject({ type: 'extract', kept: 0, error: 'haiku: no scripted reply' })
 })
 
+test('a turn Haiku could not write up is marked unrecorded, not done', async () => {
+  const { host } = fakeHost(0.95, [])
+  const out = await processTurn(host, config(), ledgerOf(fresh()), turn('use SQLite', 1))
+  expect(out.step.outcome).toBe('unrecorded')
+  expect(stepLine(out.step)).toContain('- t1 · ⚠ ·')
+})
+
 test('a Haiku call that throws counts as a failed attempt: the turn still gets its step line and an error event', async () => {
   const { host, calls } = fakeHost(0.95, [])
   host.complete = async () => {

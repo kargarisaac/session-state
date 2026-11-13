@@ -714,7 +714,7 @@ export const register: Register = (on, options) => {
                   <Text dimColor>{`t${v.turn}`}</Text>
                 </Box>
                 <Box width={2}>
-                  <Text color={v.mark === '✓' ? 'success' : v.mark === '✗' ? 'error' : 'inactive'} bold>
+                  <Text color={v.mark === '✓' ? 'success' : v.mark === '✗' ? 'error' : v.mark === '⚠' ? 'warning' : 'inactive'} bold>
                     {v.mark}
                   </Text>
                 </Box>

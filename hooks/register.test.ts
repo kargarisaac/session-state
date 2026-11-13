@@ -1510,7 +1510,7 @@ test('retry runs a failed turn again and rewrites its step line with what it fou
   await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
   await say($, 'Please use SQLite from now on.', 'Switched.', 1)
   await settle(clock, files, f => f.has(STEPS))
-  expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ · Asked: Please use SQLite from now on.')
+  expect(files.get(STEPS) ?? '').toContain('- t1 · ⚠ · Asked: Please use SQLite from now on.')
   const out = await $.command.run({ command: 'session-state', args: 'retry' } as never)
   expect(JSON.stringify(out)).toContain('Retrying 1 turn.')
   await settle(clock, files, f => (f.get(STEPS) ?? '').includes('+M-001'))

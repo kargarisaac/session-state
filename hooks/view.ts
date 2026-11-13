@@ -2,7 +2,7 @@
 
 export type StepView = {
   turn: number
-  mark: '✓' | '✗' | '◌'
+  mark: '✓' | '✗' | '◌' | '⚠'
   text: string
   facts: string[]
   added: string[]
@@ -17,7 +17,7 @@ export const parseStep = (line: string): StepView | undefined => {
   const parts = line.slice(2).split(' · ')
   const turn = /^t(\d+)$/.exec(parts[0] ?? '')
   const mark = parts[1]
-  if (turn === null || (mark !== '✓' && mark !== '✗' && mark !== '◌')) return undefined
+  if (turn === null || (mark !== '✓' && mark !== '✗' && mark !== '◌' && mark !== '⚠')) return undefined
   const rest = parts.slice(2)
   const added: string[] = []
   const done: string[] = []
