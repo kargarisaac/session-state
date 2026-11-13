@@ -10,8 +10,8 @@ import { processTurn } from '../core/pipeline'
 import { emptyState, HISTORY_HEAD, historyBlock, learnLabel, noteLabel, parseState, renderState, seedState } from '../core/state'
 import { appendStep, hasStep, lastStep, stepLines } from '../core/steps'
 import { answersOf, continuesFrom, hasMessage, isAutomated, parseTranscript, withAnswers, withoutReminders } from '../core/transcript'
-import type { Config, Kind, State, Turn } from '../core/types'
-import type { ExtractEvent, LedgerEvent, PendingTurn, Status, Tab } from '../types'
+import type { Config, Kind, LedgerEvent, State, Turn } from '../core/types'
+import type { ExtractEvent, PendingTurn, Status, Tab } from '../types'
 import { rows, statusOf } from './format'
 import { configOf, hostOf } from './host'
 import { baseOf, dirOf, eventsOf, folderName, historyOf, pendingOf, projectOf, stateOf, stepsOf, transcriptOf } from './paths'
@@ -498,6 +498,12 @@ export const register: Register = (on, options) => {
       // prompt carries the digest.
       await update($, pendingUser, p => (p === text ? '' : p.endsWith(`\n\n${text}`) ? p.slice(0, -(text.length + 2)) : p)).catch(quiet)
       if (digest !== '') await update($, isCompacted, () => true).catch(quiet)
+    } else if (digest !== '') {
+      try {
+        await saveEvents($, [{ type: 'digest', at: await $.clock.now(), turn: (await read($, turns)) + 1, length: digest.length }])
+      } catch {
+        // Bookkeeping must not fail the prompt.
+      }
     }
     return out
   })
@@ -513,6 +519,19 @@ export const register: Register = (on, options) => {
     if (e.agentId === undefined && out.deny === undefined) {
       const call = { tool: e.tool, input: e as unknown as Record<string, unknown>, isError: out.isError === true, text: out.text ?? '' }
       await update($, facts, f => addToolCall(f, call)).catch(quiet)
+      if (e.tool === 'Read' || e.tool === 'Bash' || e.tool === 'Grep') try {
+        const folder = await ensure($)
+        const input = e as unknown as Record<string, unknown>
+        const path = typeof input.file_path === 'string' ? input.file_path : ''
+        const text = e.tool === 'Bash' || e.tool === 'Grep' ? JSON.stringify(input) : ''
+        const names = ['state.md', 'steps.md', 'history.md', 'events.jsonl']
+        const file = e.tool === 'Read'
+          ? names.find(name => path === `${folder}/${name}`)
+          : (names.find(name => text.includes(`${folder}/${name}`)) ?? (text.includes(folder) ? baseOf(folder) : undefined))
+        if (file !== undefined) await saveEvents($, [{ type: 'read', at: await $.clock.now(), turn: (await read($, turns)) + 1, tool: e.tool, file }])
+      } catch {
+        // Bookkeeping must not fail the tool call.
+      }
       if (e.tool === 'AskUserQuestion' && out.isError !== true) {
         const answers = answersOf(out.result ?? out.text)
         if (answers !== '') await update($, pendingUser, p => withAnswers(p, answers)).catch(quiet)
@@ -524,7 +543,15 @@ export const register: Register = (on, options) => {
   // Only notes that the main chat was compacted. It never changes, starts or skips a compaction.
   on('session.compact', async ($, e, next) => {
     const out = await next(e)
-    if (e.agentId === undefined && e.trigger !== 'precompute' && out.skip === undefined) await update($, isCompacted, () => true).catch(quiet)
+    if (e.agentId === undefined && e.trigger !== 'precompute' && out.skip === undefined) {
+      await update($, isCompacted, () => true).catch(quiet)
+      try {
+        if ((await read($, dir)) === '') await ensure($)
+        await saveEvents($, [{ type: 'compaction', at: await $.clock.now(), turn: await read($, turns) }])
+      } catch {
+        // Bookkeeping must not fail the compaction.
+      }
+    }
     return out
   })
 

@@ -194,4 +194,8 @@ export type TurnRecord = {
   facts: TurnFacts
 }
 
-export type LedgerEvent = GateEvent | ExtractEvent | TurnRecord
+export type CompactionEvent = { type: 'compaction'; at: number; turn: number }
+export type DigestEvent = { type: 'digest'; at: number; turn: number; length: number }
+export type ReadEvent = { type: 'read'; at: number; turn: number; tool: string; file: string }
+
+export type LedgerEvent = GateEvent | ExtractEvent | TurnRecord | CompactionEvent | DigestEvent | ReadEvent
