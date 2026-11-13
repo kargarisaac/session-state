@@ -195,7 +195,7 @@ export type TurnRecord = {
 }
 
 export type CompactionEvent = { type: 'compaction'; at: number; turn: number }
-export type ConsolidateEvent = { type: 'consolidate'; at: number; turn: number; merged: number; superseded: number; done: number; dropped: number; topics: number; usage: Usage; error?: string }
+export type ConsolidateEvent = { type: 'consolidate'; at: number; turn: number; merged: number; superseded: number; done: number; dropped: number; skipped: number; topics: number; usage: Usage; error?: string }
 export type DigestEvent = { type: 'digest'; at: number; turn: number; length: number }
 export type ReadEvent = { type: 'read'; at: number; turn: number; tool: string; file: string }
 

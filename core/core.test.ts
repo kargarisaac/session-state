@@ -873,13 +873,17 @@ test('consolidation records every removed note and keeps merge evidence', () => 
   ])
 })
 
-test('consolidation rejects dropping a rule without changing the ledger', async () => {
-  const state = applyMemories(fresh(), [memory('Never merge pull requests.', 'Never merge pull requests.', { kind: 'requirement' })], 1, 'id-1', '', []).state
-  const { host } = fakeHost(1, [json({ merges: [], replaces: [], done: [], dropped: [{ id: 1, reason: 'old' }], topics: [], assign: [] })])
+test('consolidation never drops a rule: that item is skipped and the rest still applies', async () => {
+  const state = applyMemories(fresh(), [
+    memory('Never merge pull requests.', 'Never merge pull requests.', { kind: 'requirement' }),
+    memory('Run the old checks.', 'Run the old checks.', { kind: 'ask' }),
+  ], 1, 'id-1', '', []).state
+  const { host } = fakeHost(1, [json({ merges: [], replaces: [], done: [], dropped: [{ id: 1, reason: 'old' }, { id: 2, reason: 'abandoned' }], topics: [], assign: [{ id: 99, topic: 'Nope' }] })])
   const out = await consolidate(host, state, '', [], 0, 1, [])
-  expect(out.state).toEqual(state)
-  expect(out.moved).toEqual([])
-  expect(out.error).toContain('only asks')
+  expect(out.error).toBe(undefined)
+  expect(out.skipped).toBe(2)
+  expect(out.state.notes.map(n => n.id)).toEqual([1])
+  expect(out.moved.map(m => [m.item.id, m.reason])).toEqual([[2, 'dropped']])
 })
 
 test('two ledgers with the same rule yield one standing suggestion', () => {

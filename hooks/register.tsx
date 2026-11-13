@@ -108,6 +108,7 @@ const loadState = (text: string, front: Record<string, string>): State => {
 const suggestionsOf = (folder: string) => `${folder}/suggestions.md`
 const LEDGER_FILES = [stateOf, stepsOf, historyOf, eventsOf, pendingOf, suggestionsOf]
 const MAX_PARENTS = 12
+const PEERS = 20
 
 // The transcript a ledger folder names in its state.md.
 const transcriptPathIn = async ($: EngineInterface, home: string, folder: string): Promise<string | undefined> => {
@@ -363,7 +364,9 @@ const compactLedger = async ($: EngineInterface, config: Config, folder: string,
   if (!(await isHere($, folder))) return false
   if (outcome.error === undefined) {
     const peers = await listOf($, dirOf(folder))
-    const others = await Promise.all(peers.filter(e => e.kind === 'dir' && `${dirOf(folder)}/${e.name}` !== folder).map(async e => parseState(await readText($, stateOf(`${dirOf(folder)}/${e.name}`)))))
+    // Folder names start with the date: the newest chats of the project are enough to see a repeated rule.
+    const newest = peers.filter(e => e.kind === 'dir' && `${dirOf(folder)}/${e.name}` !== folder).map(e => e.name).sort().slice(-PEERS)
+    const others = await Promise.all(newest.map(async name => parseState(await readText($, stateOf(`${dirOf(folder)}/${name}`)))))
     const suggestions = standingRules(outcome.state, others).map(n => `- ${n.text}`).join('\n')
     if (outcome.moved.length > 0) {
       const before = await readText($, historyOf(folder))
@@ -377,7 +380,7 @@ const compactLedger = async ($: EngineInterface, config: Config, folder: string,
     await $.fs.write(suggestionsOf(folder), suggestions === '' ? '' : `${suggestions}\n`)
   }
   const count = (reason: string) => outcome.moved.filter(m => m.reason === reason).length
-  await saveEvents($, [{ type: 'consolidate', at: await $.clock.now(), turn, merged: count('merged'), superseded: count('superseded'), done: count('done'), dropped: count('dropped'), topics: Object.keys(outcome.state.topics).length, usage: outcome.usage, ...(outcome.error === undefined ? {} : { error: outcome.error }) }])
+  await saveEvents($, [{ type: 'consolidate', at: await $.clock.now(), turn, merged: count('merged'), superseded: count('superseded'), done: count('done'), dropped: count('dropped'), skipped: outcome.skipped, topics: Object.keys(outcome.state.topics).length, usage: outcome.usage, ...(outcome.error === undefined ? {} : { error: outcome.error }) }])
   if (outcome.error !== undefined) await update($, status, s => ({ ...s, message: `error: ${outcome.error!.slice(0, 140)}` }))
   return true
 }
