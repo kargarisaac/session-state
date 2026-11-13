@@ -170,7 +170,8 @@ test('a decision above the gate lands in the session folder: state, step, archiv
   expect(events).toContain('"type":"turn"')
   expect(events).toContain('"mode":"extract"')
   expect(files.get(`${ROOT}/demo/INDEX.md`) ?? '').toContain('2026-10-17_abc12345/state.md')
-  expect(calls.jev).toBe(1)
+  expect(events).toContain('"action":"always"')
+  expect(calls.jev).toBe(0)
   expect(calls.haiku).toBe(1)
   expect(calls.efforts).toEqual(['high'])
 
@@ -190,16 +191,21 @@ test('a decision above the gate lands in the session folder: state, step, archiv
 
 test('a turn below the gate gets a low-effort step line and no note', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
-  const { files, calls } = world(on, 0.1, [{ step: { text: 'Ran the tests; all pass.', outcome: 'ok' }, memories: [] }])
+  const { files, calls } = world(on, 0.1, [
+    { step: { text: 'Read the repo.', outcome: 'ok' }, memories: [] },
+    { step: { text: 'Ran the tests; all pass.', outcome: 'ok' }, memories: [] },
+  ])
 
   await $.session.start({ cwd: '/work/demo', surface: 'terminal' } as never)
-  await say($, 'run the tests', 'All pass.', 1)
-  await settle(clock, files, f => f.has(STEPS))
+  await say($, 'look at the repo', 'Done.', 1)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t1'))
+  await say($, 'run the tests', 'All pass.', 2)
+  await settle(clock, files, f => (f.get(STEPS) ?? '').includes('- t2'))
 
-  expect(files.get(STEPS) ?? '').toContain('- t1 · ✓ · Ran the tests; all pass.')
+  expect(files.get(STEPS) ?? '').toContain('- t2 · ✓ · Ran the tests; all pass.')
   expect(files.get(STATE) ?? '').toContain('## Open asks\n_None._')
   expect(files.get(EVENTS) ?? '').toContain('"action":"skip"')
-  expect(calls.efforts).toEqual(['low'])
+  expect(calls.efforts).toEqual(['high', 'low'])
 })
 
 test('the main agent\'s tool calls become the turn facts; a subagent\'s do not', async ($, on) => {

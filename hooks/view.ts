@@ -42,4 +42,4 @@ export const plural = (n: number, one: string, many = `${one}s`): string => `${n
 
 // A gate decision's colour: what it did to the turn.
 export const gateTone = (action: string): 'success' | 'warning' | 'error' | 'inactive' =>
-  action === 'extract' ? 'success' : action === 'audit' ? 'warning' : action === 'error' ? 'error' : 'inactive'
+  action === 'extract' || action === 'always' ? 'success' : action === 'audit' ? 'warning' : action === 'error' ? 'error' : 'inactive'

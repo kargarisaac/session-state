@@ -466,13 +466,13 @@ test('a real Jev answer parses, a malformed one reports an error, and the gate s
 
 test('below the threshold one low-effort summarization runs: a step, no notes about the user', async () => {
   const { host, calls } = fakeHost(0.2, [reply({ step: 'Ran the tests; all pass.', memories: [{ kind: 'decision', text: 'X.', quote: 'run the tests' }] })])
-  const out = await processTurn(host, config(), ledgerOf(fresh()), turn('run the tests'))
+  const out = await processTurn(host, config(), ledgerOf(fresh()), turn('run the tests', 2))
   expect(calls.complete).toBe(1)
   expect(calls.requests[0]!.effort).toBe('low')
   expect(out.events[0]).toMatchObject({ type: 'gate', action: 'skip', p: 0.2 })
   expect(out.events[1]).toMatchObject({ type: 'extract', mode: 'summarize', kept: 0 })
   expect(out.state.notes.length).toBe(0)
-  expect(out.step).toMatchObject({ turn: 1, outcome: 'ok', text: 'Ran the tests; all pass.' })
+  expect(out.step).toMatchObject({ turn: 2, outcome: 'ok', text: 'Ran the tests; all pass.' })
 })
 
 test('above the threshold one extraction at the set effort saves a rich note with its source', async () => {
@@ -520,7 +520,7 @@ test('a note whose quote is invented is dropped, not saved', async () => {
 
 test('with Jev down or off, Haiku extracts so nothing is lost', async () => {
   const down = fakeHost('down', [reply()])
-  const outDown = await processTurn(down.host, config(), ledgerOf(fresh()), turn('use SQLite'))
+  const outDown = await processTurn(down.host, config(), ledgerOf(fresh()), turn('use SQLite', 2))
   expect(outDown.events[0]).toMatchObject({ action: 'error' })
   expect(outDown.events[1]).toMatchObject({ mode: 'extract' })
   const off = fakeHost(0, [reply()])
@@ -528,6 +528,21 @@ test('with Jev down or off, Haiku extracts so nothing is lost', async () => {
   expect(off.calls.post).toBe(0)
   expect(outOff.events[0]).toMatchObject({ action: 'off' })
   expect(outOff.events[1]).toMatchObject({ mode: 'extract' })
+})
+
+test('the first turn of a chat and a message over 600 characters skip the gate and get extraction', async () => {
+  const first = fakeHost(0.1, [reply()])
+  const outFirst = await processTurn(first.host, config(), ledgerOf(fresh()), turn('build the parser', 1))
+  expect(first.calls.post).toBe(0)
+  expect(outFirst.events[0]).toMatchObject({ action: 'always' })
+  expect(outFirst.events[1]).toMatchObject({ mode: 'extract' })
+  const long = fakeHost(0.1, [reply()])
+  const outLong = await processTurn(long.host, config(), ledgerOf(fresh()), turn('x '.repeat(301), 7))
+  expect(long.calls.post).toBe(0)
+  expect(outLong.events[1]).toMatchObject({ mode: 'extract' })
+  const short = fakeHost(0.1, [reply()])
+  const outShort = await processTurn(short.host, config(), ledgerOf(fresh()), turn('x '.repeat(299), 7))
+  expect(outShort.events[0]).toMatchObject({ action: 'skip' })
 })
 
 test('Haiku failing twice keeps the state, records the error, and the step falls back to the user words', async () => {
@@ -583,11 +598,11 @@ test('one turn can finish an ask, record a learning, name a file and replace a d
 
 test('the ledger round-trips, keeps the turn archive, and its totals match the events', async () => {
   const { host } = fakeHost(0.95, [reply({ memories: [{ kind: 'decision', text: 'Use SQLite.', quote: 'use SQLite' }] })])
-  const t = turn('use SQLite, key sk-or-v1-abcdef1234567890abcdef', 1, { facts: withFacts({ read: ['/a'] }) })
+  const t = turn('use SQLite, key sk-or-v1-abcdef1234567890abcdef', 2, { facts: withFacts({ read: ['/a'] }) })
   const out = await processTurn(host, config(), ledgerOf(fresh()), t)
   const events = parseLedger(serializeLedger([turnRecord(t, 5), ...out.events]))
   expect(events.slice(1)).toEqual(out.events)
-  expect(archivedTurns(events)[0]).toMatchObject({ turn: 1, facts: { read: ['/a'] } })
+  expect(archivedTurns(events)[0]).toMatchObject({ turn: 2, facts: { read: ['/a'] } })
   expect(archivedTurns(events)[0]!.user.includes('abcdef1234567890')).toBe(false)
   const stats = summarize(events)
   expect(stats).toMatchObject({ turns: 1, passed: 1, saved: 1, jevCalls: 1, extractions: 1, summaries: 0 })

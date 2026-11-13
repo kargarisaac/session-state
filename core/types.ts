@@ -147,7 +147,7 @@ export type GateEvent = {
   ms: number
   inputTokens: number
   cost: number
-  action: 'extract' | 'skip' | 'audit' | 'error' | 'off'
+  action: 'extract' | 'always' | 'skip' | 'audit' | 'error' | 'off'
   error?: string
 }
 
