@@ -40,7 +40,7 @@ export type ExtractEvent = {
 
 export type TurnRecord = { type: 'turn'; at: number; turn: number; turnId: string; user: string; answer: string; facts: TurnFacts }
 
-export type LedgerEvent = GateEvent | ExtractEvent | TurnRecord
+export type LedgerEvent = GateEvent | ExtractEvent | TurnRecord | { type: 'compaction'; at: number; turn: number } | { type: 'digest'; at: number; turn: number; length: number } | { type: 'read'; at: number; turn: number; tool: string; file: string }
 
 export type PendingTurn = {
   turn: number
@@ -77,6 +77,7 @@ declare module 'claude-code' {
       isCompacted: boolean
       tab: Tab
       isHistoryShown: boolean
+      topicSent: Record<string, number>
     }
   }
 }

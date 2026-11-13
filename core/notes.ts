@@ -1,4 +1,5 @@
 import { KINDS } from './types'
+import { topicOf } from './state'
 import type { Kind, Memory, Moved, Note, State } from './types'
 
 export const activeNotes = (state: State): Note[] => state.notes.filter(n => n.status === 'active')
@@ -39,6 +40,18 @@ export const newFront = (f: SessionFacts): Record<string, string> => ({
   next_learning: '1',
 })
 
+const repeatOf = (m: Memory, notes: Note[], via?: string): Note | undefined => {
+  const words = (s: string) => [...new Set(s.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [])]
+  const a = words(m.quote)
+  return notes.find(n => {
+    if (n.status !== 'active' || n.kind !== m.kind || n.via !== via || topicOf(n) !== topicOf(m)) return false
+    const b = words(n.quote)
+    if (m.quote.trim().length < 3 || n.quote.trim().length < 3 || a.length === 0 || b.length === 0) return false
+    // Four fifths of both quotes must match, so a short shared phrase alone cannot merge two rules.
+    return a.filter(w => b.includes(w)).length / Math.max(a.length, b.length) >= 0.8
+  })
+}
+
 // New notes get the next id; a note that replaces or finishes another moves the old one out of the state.
 export const applyMemories = (
   state: State,
@@ -48,11 +61,26 @@ export const applyMemories = (
   title: string,
   done: number[] = [],
   via?: string,
+  restates: number[] = [],
 ): { state: State; moved: Moved[] } => {
   let next = Math.max(Number(state.front.next_id) || 1, state.notes.reduce((top, n) => Math.max(top, n.id + 1), 1))
   let notes = [...state.notes]
   const moved: Moved[] = []
+  const repeated = new Set<number>()
+  const mark = (id: number) => {
+    if (repeated.has(id)) return
+    repeated.add(id)
+    notes = notes.map(n => n.id === id && n.status === 'active' && n.via === via
+      ? { ...n, count: (n.count ?? 1) + 1, lastTurn: turn }
+      : n)
+  }
+  for (const id of restates) mark(id)
   for (const m of memories) {
+    const repeat = m.supersedes.length === 0 ? repeatOf(m, notes, via) : undefined
+    if (repeat !== undefined) {
+      mark(repeat.id)
+      continue
+    }
     const id = next++
     for (const old of notes.filter(n => m.supersedes.includes(n.id))) moved.push({ item: old, reason: 'superseded', by: id, turn })
     notes = notes.filter(n => !m.supersedes.includes(n.id))
@@ -66,6 +94,9 @@ export const applyMemories = (
       quote: m.quote,
       source: { turnId, refersTo: m.refersTo },
       status: 'active',
+      count: 1,
+      lastTurn: turn,
+      ...(m.topic === undefined ? {} : { topic: m.topic }),
       ...(via === undefined ? {} : { via }),
     })
   }
@@ -79,27 +110,35 @@ export const applyMemories = (
 // What the agent is told about the ledger. It must read the same on every request of a session, so the
 // prompt cache is written once: no counts, no times, only the folder.
 export const pointerText = (dir: string): string =>
-  `Session ledger: a tool keeps a ledger of this conversation in ${dir}/. ` +
-  'state.md holds what is true now: the user\'s open asks, their decisions and rules with the reason and their exact words, ' +
-  'what was learned the hard way, and the files that matter with their roles. steps.md has one line per turn; history.md has ' +
-  'replaced and finished items. The files may not exist until the first turn is recorded. Read state.md when you need to ' +
-  'recall what the user asked or decided or which files matter, after a compaction, or when you are unsure which decision is ' +
-  'current. Do not edit these files; they are maintained automatically.'
+  `Session ledger: a tool keeps the state of this conversation in ${dir}/. ` +
+  'state.md has a Now block, a topic index, and one ## <topic> section per topic. ' +
+  'Notes have permanent ids such as M-012. Grep state.md for a topic heading or id; ' +
+  "grep events.jsonl for the user's exact past words. steps.md records each turn and history.md holds past notes. " +
+  'The files may not exist until the first turn is recorded. Do not edit them; they are maintained automatically.'
 
-const MAX_RULES = 8
-
-// The few rules that must hold all chat long, for the system prompt. Empty when the person has none.
-export const rulesText = (state: State): string => {
-  // A rule another session relayed is not the person's own word, so it is not pinned.
-  const rules = activeNotes(state).filter(n => (n.kind === 'requirement' || n.kind === 'preference') && n.via === undefined)
+// The rules that must hold for the whole chat, newest first.
+export const rulesText = (state: State, cap = 3000): string => {
+  const rules = activeNotes(state)
+    .filter(n => n.via === undefined && (n.kind === 'correction' || ((n.kind === 'requirement' || n.kind === 'preference') && (n.count ?? 1) >= 2)))
+    .sort((a, b) => (b.lastTurn ?? b.turn) - (a.lastTurn ?? a.turn) || b.id - a.id)
   if (rules.length === 0) return ''
-  const shown = rules.slice(-MAX_RULES)
-  const older = rules.length - shown.length
-  return [
-    'Standing rules the user gave in this conversation, from the session ledger. They still apply:',
-    ...shown.map(r => `- ${r.text}`),
-    ...(older > 0 ? [`(${older} older rule${older === 1 ? ' is' : 's are'} in state.md.)`] : []),
-  ].join('\n')
+  const head = 'Core rules the user gave in this conversation:'
+  const shown: string[] = []
+  for (const rule of rules) {
+    const line = `- ${rule.text.replace(/\s+/g, ' ').trim()}`
+    const left = rules.length - shown.length - 1
+    const tail = left > 0 ? `\n(${left} more in state.md.)` : ''
+    if ([head, ...shown, line].join('\n').length + tail.length > cap) {
+      if (shown.length === 0) {
+        const room = cap - head.length - tail.length - 2
+        if (room > 3) shown.push(`${line.slice(0, room - 1).replace(/[\uD800-\uDBFF]$/, '')}…`)
+      }
+      break
+    }
+    shown.push(line)
+  }
+  const left = rules.length - shown.length
+  return [head, ...shown, ...(left > 0 ? [`(${left} more in state.md.)`] : [])].join('\n')
 }
 
 export type IndexRow = { file: string; date: string; title: string; active: number; learned: number; steps: number }

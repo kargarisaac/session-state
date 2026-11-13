@@ -16,6 +16,8 @@ const shared = [
   '"done": ids of open "ask" notes that the agent\'s reply in this turn shows are finished: it says it did them and nothing is left. Never list one you are unsure about. Usually [].',
   '"files": for each file under "Edited files with no role yet", its role in at most 10 words (what it is for, not what changed). Use the path as shown.',
   `"learnings": only something the agent found out the hard way in THIS TURN that should stop it repeating a mistake later: an approach that failed and why ("failed"), or a hard limit of the environment, tool or data ("constraint"). "evidence" is an exact piece of the agent's reply or a failed command's output, copied character for character. "replaces" lists ids of active learnings it makes untrue. Kinds: ${LEARN_KINDS.join(', ')}. Usually [].`,
+  '"now": update the Now block as a string of at most 15 short lines: Goal, Doing, Waiting on (whom), and Open asks (ids). Use the prior Now and this turn; omit it if unknown.',
+  '"topics": the topic names this turn worked on, using existing names when they fit.',
 ]
 
 const memoryRules = (maxWords: number): string[] => [
@@ -28,6 +30,9 @@ const memoryRules = (maxWords: number): string[] => [
   '"refers_to": turn numbers of earlier turns this note answers or depends on, e.g. [40] when the user replies "yes" to a question asked in t40. Usually [].',
   `"kind": one of ${KINDS.join(', ')}. "ask" is an action still to be done. "decision" is a choice that stays true. "requirement" and "preference" are rules for the rest of the chat. "correction" fixes something the agent got wrong.`,
   '"supersedes": ids of active notes this note REPLACES or REVERSES (the user changed their mind about the same thing). A note that adds to or narrows an earlier one does NOT supersede it. When unsure, [].',
+  '"topic": an existing topic name when it fits, otherwise a short plain name for each memory.',
+  '"restates": notes the user said again, as {"id": "M-001", "quote": "exact words from this message"}; do not add a copy to memories.',
+  '"need_topic": if an existing topic section is needed but not shown, name ONE topic from the index; you will get it and answer again. Otherwise omit it.',
   '"need": when you cannot understand the user\'s message without an older turn that is not shown in full (e.g. "do what I said about the deck"), the number of that turn; you will get it and answer again. Otherwise omit it.',
 ]
 
@@ -38,8 +43,8 @@ export const systemPrompt = (mode: Mode, maxWords: number): string =>
     'Reply with JSON only, no prose:',
     '{"title": "<=6 words, only when the current title is (none)", "step": {"text": "...", "outcome": "ok"}, "done": [], "files": [{"path": "...", "role": "..."}], ' +
       '"learnings": [{"kind": "failed", "text": "...", "why": "...", "evidence": "...", "replaces": []}], ' +
-      '"memories": [{"kind": "...", "text": "...", "why": "...", "context": "...", "quote": "...", "refers_to": [], "supersedes": []}]' +
-      (mode === 'extract' ? ', "need": null}' : '}'),
+      '"now": "...", "topics": [], "memories": [{"kind": "...", "topic": "...", "text": "...", "why": "...", "context": "...", "quote": "...", "refers_to": [], "supersedes": []}]' +
+      (mode === 'extract' ? ', "restates": [], "need_topic": null, "need": null}' : '}'),
   ].join('\n')
 
 export const wordCount = (text: string): number => (text.trim() === '' ? 0 : text.trim().split(/\s+/).length)
@@ -70,6 +75,10 @@ export type Extraction = {
   files: FileRole[]
   learnings: LearningDraft[]
   memories: Memory[]
+  restates: { id: number; quote: string }[]
+  topics: string[]
+  now?: string
+  needTopic?: string
   need?: number
 }
 
@@ -102,7 +111,7 @@ export const parseExtraction = (text: string): Extraction | { error: string } =>
   const step = (json.step ?? {}) as Record<string, unknown>
   const memories: Memory[] = objects(json.memories).flatMap(m =>
     isKind(m.kind) && typeof m.text === 'string' && typeof m.quote === 'string'
-      ? [{ kind: m.kind, text: str(m.text), why: str(m.why), context: str(m.context), quote: m.quote, refersTo: idsOf(m.refers_to), supersedes: idsOf(m.supersedes) }]
+      ? [{ kind: m.kind, text: str(m.text), why: str(m.why), context: str(m.context), quote: m.quote, refersTo: idsOf(m.refers_to), supersedes: idsOf(m.supersedes), ...(str(m.topic) === '' ? {} : { topic: str(m.topic) }) }]
       : [],
   )
   const learnings: LearningDraft[] = objects(json.learnings).flatMap(l =>
@@ -112,6 +121,10 @@ export const parseExtraction = (text: string): Extraction | { error: string } =>
   )
   const files = objects(json.files).flatMap(f => (typeof f.path === 'string' && typeof f.role === 'string' ? [{ path: f.path.trim(), role: str(f.role) }] : []))
   const need = idOf(json.need)
+  const restates = objects(json.restates).flatMap(r => {
+    const id = idOf(r.id)
+    return id === undefined || typeof r.quote !== 'string' ? [] : [{ id, quote: r.quote }]
+  })
   return {
     title: str(json.title),
     step: { text: str(step.text), outcome: step.outcome === 'failed' ? 'failed' : 'ok' },
@@ -119,6 +132,10 @@ export const parseExtraction = (text: string): Extraction | { error: string } =>
     files,
     learnings,
     memories,
+    restates,
+    topics: Array.isArray(json.topics) ? [...new Set(json.topics.map(str).filter(Boolean))] : [],
+    ...(typeof json.now === 'string' && json.now.trim() !== '' ? { now: json.now.trim().split(/\r?\n/).slice(0, 15).join('\n') } : {}),
+    ...(str(json.need_topic) === '' ? {} : { needTopic: str(json.need_topic) }),
     ...(need === undefined ? {} : { need }),
   }
 }
@@ -136,7 +153,7 @@ export const checkMemories = (memories: Memory[], user: string, active: Note[], 
   // Haiku read the redacted message, so a quote may carry a "[redacted ...]" mark where a secret was.
   const words = [user, redact(user)]
   const activeIds = new Set(active.map(n => n.id))
-  const seen = new Set(active.map(n => squash(n.text).toLowerCase()))
+  const seen = new Set<string>()
   const kept: Memory[] = []
   const overLong: Memory[] = []
   const dropped: string[] = []
