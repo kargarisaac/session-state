@@ -4,10 +4,10 @@ import type { EngineInterface, PluginOptions, Register, ThemeKey } from 'claude-
 import { digestText } from '../core/digest'
 import { addToolCall, emptyFacts } from '../core/facts'
 import { fileIndex, rankFiles } from '../core/files'
-import { archivedTurns, fitLedger, parseLedger, parsePending, serializeLedger, serializePending, summarize, turnRecord } from '../core/ledger'
+import { archivedTurns, fitLedger, parseLedger, parsePending, recentTopics, serializeLedger, serializePending, summarize, turnRecord } from '../core/ledger'
 import { activeNotes, newFront, parseOldNotes, pointerText, rulesText, upsertIndex } from '../core/notes'
 import { processTurn } from '../core/pipeline'
-import { emptyState, HISTORY_HEAD, historyBlock, learnLabel, noteLabel, parseState, renderState, seedState } from '../core/state'
+import { emptyState, HISTORY_HEAD, historyBlock, learnLabel, noteLabel, parseState, renderState, seedState, topicIndex, topicNames, topicSection } from '../core/state'
 import { appendStep, hasStep, lastStep, stepLines } from '../core/steps'
 import { answersOf, continuesFrom, hasMessage, isAutomated, parseTranscript, withAnswers, withoutReminders } from '../core/transcript'
 import type { Config, Kind, State, Turn } from '../core/types'
@@ -431,7 +431,7 @@ const digestOf = async ($: EngineInterface): Promise<string> => {
   const stepsMd = await read($, steps)
   // The queue still holds the turns Haiku has not finished, so the ledger leaves them out.
   const unrecorded = (await read($, queue)).filter(t => !hasStep(stepsMd, t.turn)).map(t => ({ turn: t.turn, user: t.user }))
-  return digestText(state, stepLines(stepsMd), ranked(state, ledger, await read($, turns)), folder, undefined, unrecorded)
+  return digestText(state, stepLines(stepsMd), ranked(state, ledger, await read($, turns)), folder, undefined, unrecorded, ledger)
 }
 
 export const register: Register = (on, options) => {
@@ -471,6 +471,9 @@ export const register: Register = (on, options) => {
     const text = withoutReminders(e.text)
     if (!isTyped || e.command !== undefined || e.isMeta === true || text === '' || isAutomated(text) || (await read($, isPaused))) return next(e)
     let digest = ''
+    let topicText = ''
+    let sent: string[] = []
+    let sentAt = 0
     try {
       await ensure($)
       await update($, pendingUser, p => (p === '' ? text : `${p}\n\n${text}`))
@@ -489,15 +492,56 @@ export const register: Register = (on, options) => {
           throw error
         }
       }
+      const state = loadState(await read($, md), {})
+      const turn = (await read($, turns)) + 1
+      sentAt = turn
+      await update($, events, list => {
+        const current = recentTopics(list, digest === '' ? 1 : 3).filter(t => topicNames(state).includes(t))
+        const extracts = list.filter((event): event is ExtractEvent => event.type === 'extract')
+        const last = extracts.at(-1)
+        if (last === undefined || current.length === 0) return list
+        const prior = [...extracts].reverse().map(event => (event as ExtractEvent & { topicSent?: Record<string, number> }).topicSent).find(Boolean) ?? {}
+        const saved = Object.fromEntries(Object.entries(prior).filter(([, at]) => turn - at <= 5))
+        if (digest !== '') {
+          sent = current.filter(t => digest.includes(`\n## ${t}\n`))
+        } else {
+          for (const topic of current) {
+            if (sent.length === 2 || (prior[topic] !== undefined && turn - prior[topic]! <= 5)) continue
+            const section = topicSection(state, topic)
+            const room = 3000 - topicText.length - (topicText === '' ? 0 : 2)
+            if (room < topic.length + 40) continue
+            let part = section
+            if (section.length > room) {
+              part = section.slice(0, room - 21).replace(/[\uD800-\uDBFF]$/, '')
+              const fence = part.lastIndexOf('```')
+              if ((part.match(/```/g)?.length ?? 0) % 2 === 1) part = part.slice(0, fence)
+              part = `${part.trimEnd()}…\n(cut; see state.md)`
+            }
+            topicText += `${topicText === '' ? '' : '\n\n'}${part}`
+            sent.push(topic)
+          }
+        }
+        for (const topic of sent) saved[topic] = turn
+        return list.map(event => event === last ? { ...event, topicSent: saved } : event)
+      })
     } catch {
       // never block a prompt
     }
-    const out = await next(digest === '' ? e : { ...e, context: [...(e.context ?? []), digest] })
+    const extra = digest || topicText
+    const out = await next(extra === '' ? e : { ...e, context: [...(e.context ?? []), extra] })
     if (out.drop !== undefined) {
       // Dropped beneath: the agent never saw it. It is not something the person asked, and the next typed
       // prompt carries the digest.
       await update($, pendingUser, p => (p === text ? '' : p.endsWith(`\n\n${text}`) ? p.slice(0, -(text.length + 2)) : p)).catch(quiet)
       if (digest !== '') await update($, isCompacted, () => true).catch(quiet)
+      if (sent.length > 0) await update($, events, list => list.map(event => {
+        if (event.type !== 'extract') return event
+        const prior = (event as ExtractEvent & { topicSent?: Record<string, number> }).topicSent
+        if (prior === undefined) return event
+        const saved = { ...prior }
+        for (const topic of sent) if (saved[topic] === sentAt) delete saved[topic]
+        return { ...event, topicSent: saved }
+      })).catch(quiet)
     }
     return out
   })
@@ -574,8 +618,17 @@ export const register: Register = (on, options) => {
     try {
       const folder = await ensure($)
       const sections = [...out.sections, { id: 'session-state:ledger', text: pointerText(folder), scope: 'session' as const }]
+      const state = loadState(await readText($, stateOf(folder)), {})
+      const index = topicIndex(state).split('\n').filter(Boolean)
+      const indexLines: string[] = []
+      for (const line of index) {
+        if (['Topic index:', ...indexLines, line, '(more in state.md)'].join('\n').length > 1500) break
+        indexLines.push(line)
+      }
+      const indexText = index.length === 0 ? '' : ['Topic index:', ...indexLines, ...(indexLines.length < index.length ? ['(more in state.md)'] : [])].join('\n')
+      if (indexText !== '') sections.push({ id: 'session-state:topics', text: indexText, scope: 'session' as const })
       if ((await configOf($, options)).pinRules) {
-        const rules = rulesText(loadState(await readText($, stateOf(folder)), {}))
+        const rules = rulesText(state, 3000 - indexText.length)
         if (rules !== '') sections.push({ id: 'session-state:rules', text: rules, scope: 'session' as const })
       }
       return { sections }
