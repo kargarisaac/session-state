@@ -66,6 +66,9 @@ export const applyMemories = (
       quote: m.quote,
       source: { turnId, refersTo: m.refersTo },
       status: 'active',
+      count: 1,
+      lastTurn: turn,
+      ...(m.topic === undefined ? {} : { topic: m.topic }),
       ...(via === undefined ? {} : { via }),
     })
   }

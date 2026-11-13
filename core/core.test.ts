@@ -281,25 +281,29 @@ test('state.md round-trips rich notes, learnings, roles and the person\'s own li
   )
   state = applyLearnings(state, [{ kind: 'failed', text: 'Bun test needs the plugin runner.', why: 'imports claude-code', evidence: 'Cannot find module', replaces: [] }], 3).state
   state = applyFileRoles(state, [{ path: `${CWD}/core/state.ts`, role: 'Reads and writes state.md' }])
-  state = { ...state, own: ['- ship on friday'] }
+  state = { ...state, now: 'Goal: ship\nDoing: tests', topics: { Storage: 'One file.' }, notes: state.notes.map((n, i) => i === 0 ? { ...n, topic: 'Storage', count: 3, lastTurn: 8, source: { ...n.source, refersTo: [1, 2] } } : n), own: ['- ship on friday'] }
   const files = fileIndex([turnRecord(turn('x', 3, { facts: withFacts({ edited: [`${CWD}/core/state.ts`] }) }), 0)])
   const md = renderState(state, files)
   expect(md).toContain('# Storage choice')
-  expect(md).toContain('### M-001 · decision · t3\nUse SQLite for storage.\nWhy: One file, no server.\nContext: Choosing the ledger store.\nQuote: "use SQLite"\nSource: t3 · turn turn-uui')
-  expect(md).toContain('## Open asks\n### M-002 · ask · t3')
+  expect(md).toContain('## Now\nGoal: ship\nDoing: tests')
+  expect(md).toContain('## Topic index\n- Storage: One file. M-001\n- Unsorted M-002')
+  expect(md).toContain('## Storage\n- M-001 · decision · Use SQLite for storage. "use SQLite" (t8, said 3 times)')
+  expect(md).toContain('## Unsorted\n- M-002 · ask · Rename the video.')
   expect(md).toContain('### L-001 · failed · t3')
   expect(md).toContain('- `core/state.ts` · edited 1 · t3 · role: Reads and writes state.md')
   expect(md).toContain('## Your notes\n- ship on friday')
 
   const again = parseState(md)
-  expect(again.notes.map(n => ({ ...n, source: { ...n.source, turnId: '' } }))).toEqual(state.notes.map(n => ({ ...n, source: { ...n.source, turnId: '' } })))
+  expect(again.notes).toEqual(state.notes)
+  expect(again.now).toBe(state.now)
+  expect(again.topics).toEqual({ Storage: 'One file.', Unsorted: '' })
   expect(again.learnings).toEqual(state.learnings)
   expect(again.roles).toEqual(state.roles)
   expect(again.own).toEqual(['- ship on friday'])
   expect(again.front.next_id).toBe('3')
 
   // The person deletes M-002 by hand: it stays gone and its id is not reused.
-  const edited = parseState(md.replace(/### M-002[\s\S]*?(?=\n## )/, ''))
+  const edited = parseState(md.replace(/- M-002 · ask[^\n]*\n/, ''))
   const next = applyMemories(edited, [memory('Use DuckDB.', 'q')], 9, '', '')
   expect(next.state.notes.map(n => n.id)).toEqual([1, 3])
 })
@@ -318,6 +322,50 @@ const richMd = (): string => {
   return renderState({ ...state, own: ['- ship on friday'] }, richFiles)
 }
 const richFiles = fileIndex([turnRecord(turn('x', 3, { facts: withFacts({ edited: [`${CWD}/core/state.ts`] }) }), 0)])
+
+test('a real old state.md keeps its notes when moved to the topic layout', () => {
+  const old = `## Open asks
+_None._
+
+## Decisions and rules
+### M-001 · requirement · t1
+Every Python file must start with the comment \`# owner: isaac\`.
+Why: So the user can grep for their own Python files.
+Context: Agent acknowledged the rule and asked whether to persist it in a CLAUDE.md, since a chat instruction only lasts this session.
+Quote: "every Python file must start with the comment # owner: isaac"
+Source: t1 · turn c593ddb5
+
+## Learnings
+### L-001 · constraint · t5
+The system python3 does not have pytest installed; it must be pip-installed before running tests.
+Why: Running pytest via the system python3 failed because the module was absent, and nothing in the repo declares it.
+Evidence: "/Library/Developer/CommandLineTools/usr/bin/python3: No module named pytest"
+
+## Files
+- \`calc.py\` · edited 2, read 1 · t2–t8 · role: Module defining add(a, b) for summing two values
+- \`test_calc.py\` · edited 2, read 1 · t5–t8 · role: pytest unit tests for calc.add()
+
+## Your notes
+`
+  const state = parseState(old)
+  expect(state.notes).toHaveLength(1)
+  expect(state.notes[0]).toMatchObject({ id: 1, kind: 'requirement', turn: 1, text: 'Every Python file must start with the comment `# owner: isaac`.', source: { turnId: 'c593ddb5', refersTo: [] } })
+  expect(state.notes[0]!.topic).toBeUndefined()
+  const back = parseState(renderState(state, []))
+  expect(back.notes).toEqual(state.notes.map(n => ({ ...n, count: 1, lastTurn: n.turn })))
+})
+
+test('topic notes keep hand edits and history records merged and dropped notes', () => {
+  const state = applyMemories(fresh(), [memory('Use SQLite.', 'SQLite', { topic: 'Storage', why: 'One file.' })], 2, 'full-turn-id', '').state
+  const md = renderState(state, []).replace('Use SQLite. "SQLite"', 'Use DuckDB. "DuckDB"').replace('Why: One file.', 'Why: Fast.')
+  const note = parseState(md).notes[0]!
+  const broken = md.replace(/<!-- .*? -->/, '<!-- null -->')
+  expect(parseState(broken).notes[0]).toMatchObject({ text: 'Use DuckDB.', quote: 'DuckDB' })
+  expect(note).toMatchObject({ text: 'Use DuckDB.', quote: 'DuckDB', why: 'Fast.', topic: 'Storage', count: 1, lastTurn: 2, source: { turnId: 'full-turn-id' } })
+  expect(historyBlock({ item: note, reason: 'merged', by: 3, turn: 4, note: 'Same rule.' })).toContain('merged into M-003 at t4')
+  expect(historyBlock({ item: note, reason: 'dropped', turn: 4, note: 'No longer needed.' })).toContain('dropped at t4')
+  expect(historyBlock({ item: note, reason: 'dropped', turn: 4, note: 'No longer needed.' })).toContain('Note: No longer needed.')
+})
 
 test('a state.md saved with Windows line endings reads the same as one with Unix endings', async () => {
   const md = richMd()
@@ -340,7 +388,7 @@ test('everything the person writes under "Your notes" is kept: blank lines, sub-
 
 test('a note heading the person broke does not take over the note above it', async () => {
   const two = applyMemories(fresh(), [memory('Use SQLite.', 'use SQLite', { why: 'One file.' }), memory('Keep answers short.', 'short', { why: 'Less to read.' })], 3, '', '').state
-  const md = renderState(two, []).replace('### M-002 · decision · t3', '### M-002 · decision')
+  const md = renderState(two, []).replace('- M-002 · decision ·', '- M-002 · broken ·')
   const state = parseState(md)
   expect(state.notes.map(n => [n.id, n.text, n.why])).toEqual([[1, 'Use SQLite.', 'One file.']])
 })
@@ -386,7 +434,7 @@ test('an old single-file notes file seeds the ledger with its active notes only'
   expect(notes).toEqual([{ id: 3, turn: 3, kind: 'decision', text: 'Use SQLite.' }])
   const state = seedState(notes, { ...FRONT, title })
   expect(state.front.next_id).toBe('4')
-  expect(renderState(state, [])).toContain('### M-003 · decision · t3\nUse SQLite.')
+  expect(renderState(state, [])).toContain('- M-003 · decision · Use SQLite. (t3)')
 })
 
 // ---- files, digest, context
@@ -700,7 +748,7 @@ test('a note relayed by another session keeps its sender through state.md, says 
   const { state } = applyMemories(fresh(), [memory('Ask before any paid run.', 'Ask before any paid run', { kind: 'requirement' })], 2, 'id-2', '', [], 'Lead')
   const back = parseState(renderState(state, []))
   expect(back.notes[0]!.via).toBe('Lead')
-  expect(renderState(state, [])).toContain('Via: Lead')
+  expect(renderState(state, [])).toContain('Lead: "Ask before any paid run"')
   expect(rulesText(back)).toBe('')
   expect(digestText(back, [], [], '/d')).toContain('Via Lead: "Ask before any paid run"')
 })
@@ -716,4 +764,9 @@ test('topic helpers: index in order with note ids, one section per topic, recent
   expect(topicSection(state, 'PRs')).toBe('## PRs\n- M-001 · requirement · Rule 1. "rule 1" (t1, said 3 times)\n  Why: Because.\n- M-003 · requirement · Rule 3. "rule 3" (t3)\n  Why: Because.')
   const ev = (turn: number, topics: string[]) => ({ type: 'extract' as const, at: 0, turn, turnId: `t${turn}`, model: 'h', mode: 'extract' as const, ms: 0, usage: emptyUsage(), kept: 0, learned: 0, closed: 0, roles: 0, dropped: [], topics })
   expect(recentTopics([ev(1, ['Old']), ev(5, ['A']), ev(6, ['B', 'A'])], 3)).toEqual(['B', 'A'])
+})
+
+test('a note whose text has double quotes round-trips through the topic layout', async () => {
+  const state = { ...fresh(), notes: [{ id: 1, turn: 2, kind: 'requirement' as const, text: 'Call it "Nablo Data Agent" in public.', why: 'Plain names.', context: 'Blog copy.', quote: 'say "Nablo Data Agent"', source: { turnId: 'u2', refersTo: [1] }, status: 'active' as const, topic: 'Naming', count: 2, lastTurn: 9, via: 'lead' }] }
+  expect(parseState(renderState(state, [])).notes).toEqual(state.notes)
 })
