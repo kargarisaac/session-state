@@ -16,7 +16,7 @@ import { digestText } from '../core/digest'
 import { fileIndex, rankFiles } from '../core/files'
 import { factsText } from '../core/facts'
 import { archivedTurns, turnRecord } from '../core/ledger'
-import { newFront, pointerText, rulesText } from '../core/notes'
+import { newFront, pointerText, systemTexts } from '../core/notes'
 import { processTurn } from '../core/pipeline'
 import { emptyState, HISTORY_HEAD, historyBlock, renderState } from '../core/state'
 import { appendStep, stepLines } from '../core/steps'
@@ -99,7 +99,7 @@ const replay = async (s: EvalSession, cwd: string, out: string) => {
   // What the mod hands the agent after a compaction: its system-prompt sections and the digest on the next prompt.
   const dir = `~/.claude/session-state/${s.project}/${s.id.slice(0, 8)}`
   const files = rankFiles(fileIndex(archivedTurns(events)), state, s.turns.length)
-  const injected = [pointerText(dir), rulesText(state), digestText(state, stepLines(steps), files, dir)].filter(x => x !== '').join('\n\n')
+  const injected = [pointerText(dir), ...systemTexts(state), digestText(state, stepLines(steps), files, dir, undefined, [], events)].filter(x => x !== '').join('\n\n')
   writeFileSync(join(out, 'injected.md'), injected)
   return { md, steps, events, injected }
 }

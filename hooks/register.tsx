@@ -5,9 +5,9 @@ import { digestText } from '../core/digest'
 import { addToolCall, emptyFacts } from '../core/facts'
 import { fileIndex, rankFiles } from '../core/files'
 import { archivedTurns, fitLedger, parseLedger, parsePending, recentTopics, serializeLedger, serializePending, summarize, turnRecord } from '../core/ledger'
-import { activeNotes, newFront, parseOldNotes, pointerText, rulesText, upsertIndex } from '../core/notes'
+import { activeNotes, newFront, parseOldNotes, pointerText, systemTexts, upsertIndex } from '../core/notes'
 import { processTurn } from '../core/pipeline'
-import { emptyState, HISTORY_HEAD, historyBlock, learnLabel, noteLabel, parseState, renderState, seedState, topicIndex, topicNames, topicSection } from '../core/state'
+import { emptyState, HISTORY_HEAD, historyBlock, learnLabel, noteLabel, parseState, renderState, seedState, topicNames, topicSection } from '../core/state'
 import { appendStep, hasStep, lastStep, stepLines } from '../core/steps'
 import { answersOf, continuesFrom, hasMessage, isAutomated, parseTranscript, withAnswers, withoutReminders } from '../core/transcript'
 import type { Config, Kind, LedgerEvent, State, Turn } from '../core/types'
@@ -626,18 +626,9 @@ export const register: Register = (on, options) => {
       const folder = await ensure($)
       const sections = [...out.sections, { id: 'session-state:ledger', text: pointerText(folder), scope: 'session' as const }]
       const state = loadState(await readText($, stateOf(folder)), {})
-      const index = topicIndex(state).split('\n').filter(Boolean)
-      const indexLines: string[] = []
-      for (const line of index) {
-        if (['Topic index:', ...indexLines, line, '(more in state.md)'].join('\n').length > 1500) break
-        indexLines.push(line)
-      }
-      const indexText = index.length === 0 ? '' : ['Topic index:', ...indexLines, ...(indexLines.length < index.length ? ['(more in state.md)'] : [])].join('\n')
+      const [indexText, rules] = systemTexts(state)
       if (indexText !== '') sections.push({ id: 'session-state:topics', text: indexText, scope: 'session' as const })
-      if ((await configOf($, options)).pinRules) {
-        const rules = rulesText(state, 3000 - indexText.length)
-        if (rules !== '') sections.push({ id: 'session-state:rules', text: rules, scope: 'session' as const })
-      }
+      if (rules !== '' && (await configOf($, options)).pinRules) sections.push({ id: 'session-state:rules', text: rules, scope: 'session' as const })
       return { sections }
     } catch {
       return out
