@@ -53,7 +53,7 @@ Each chat gets a folder, `~/.claude/session-state/<project>/<date>_<id8>/`, with
 | File | Holds |
 | --- | --- |
 | `state.md` | What is true now: open asks, decisions and rules, learnings, files that matter. Edit or delete an item by hand and the change sticks; lines under "Your notes" are kept. |
-| `steps.md` | One line per turn, never rewritten: `- t41 · ✓ · Moved the parser to its own file · edited core/parse.ts · +M-012 · done M-009` |
+| `steps.md` | One line per turn, never rewritten: `- t41 · ✓ · Moved the parser to its own file · edited core/parse.ts · 3 commands · 4 Claude_Browser · +M-012 · done M-009`. ✗ failed, ◌ stopped, ⚠ not recorded. |
 | `history.md` | Items that left `state.md`: replaced by a newer one, or done. |
 | `events.jsonl` | Each turn as it was (redacted, clipped, with its tool facts), and each gate and Haiku run. |
 
@@ -90,12 +90,12 @@ flowchart LR
   L --> UI[Side panel]
 ```
 
-**Every turn** the mod takes what you typed, including messages sent while the agent was working and your answers to its multiple-choice questions. It records what the main agent's tools did (files read and edited, commands that failed, commits) and archives the turn. **Jev** (a yes/no decision model on OpenRouter) reads your message, the agent's reply and the end of the previous reply, and decides whether you said something that will still matter 50 turns later. Then one **Haiku** call runs on your Claude Code login (plan usage, not billed):
+**Every turn** the mod takes what you typed, including messages sent while the agent was working and your answers to its multiple-choice questions. App events (task notifications, CI and side-session events, slash-command output) make no turn, and `<system-reminder>` blocks are removed first. A message from another Claude session is recorded, but its notes say `Via: <session name>`: they are never quoted as you and never pinned. The mod records what the main agent's tools did (files read and edited, every other tool by name, any tool that failed, commits) and archives the turn. **Jev** (a yes/no decision model on OpenRouter) reads your message, the agent's reply and the end of the previous reply, and decides whether you said something that will still matter 50 turns later. The first message of a chat and any message over 600 characters skip Jev and always get extraction: they usually set the task and its rules. Then one **Haiku** call runs on your Claude Code login (plan usage, not billed):
 
 - **Summarization**, every turn, at low effort: the step line, which open asks the reply finished, a role for each newly edited file, and any learning (an approach that failed, or a hard limit), quoted from the reply or a failed command.
 - **Extraction**, when Jev says yes (or Jev is off or down), at the set effort: all of the above, plus notes about what you said: decisions, rules, preferences, corrections and asks. Each note has a short title, why, context, your exact words and its source turn. If your message only makes sense with an older turn ("do what I said about the deck"), Haiku may ask for that turn once from the archive.
 
-Haiku sees the ledger, the last 15 steps, your last 10 messages word for word, the whole previous reply and this turn. Code then checks its answer: a note's quote must be in your message, a learning's evidence in the reply or a failed command, a file role must be for a file edited this turn. Anything else is dropped.
+Haiku sees the ledger, the last 15 steps, your last 10 messages word for word, the whole previous reply and this turn. Code then checks its answer: a note's quote must be in your message, a learning's evidence in the reply or a failed command, a file role must be for a file edited this turn. Anything else is dropped. A turn whose Haiku call fails twice gets a ⚠ step line instead of ✓; `/session-state retry` runs it again.
 
 **What the agent is told.** Two things go into the system prompt. A fixed line, the same on every request, so it costs one cache write:
 
@@ -103,7 +103,7 @@ Haiku sees the ledger, the last 15 steps, your last 10 messages word for word, t
 
 And your rules: the active `requirement` and `preference` notes (the newest 8). That part changes only when a rule is added or removed. Turn it off with `pinRules`.
 
-**After a compaction.** Claude Code's summary drops much of what a plugin added and reloads only a few files. When the mod sees the main chat compacted, it attaches a digest of the ledger (open asks, rules, learnings, files, recent steps; at most 8,000 characters, each note cut short) to the next message you type, once. A message from a task, a schedule or another session does not use it up. Turns still being recorded are not in the ledger yet, so the digest lists your messages from them first. A ledger with nothing in it gives no digest.
+**After a compaction.** Claude Code's summary drops much of what a plugin added and reloads only a few files. When the mod sees the main chat compacted, it attaches a digest of the ledger to the next message you type, once. It is in order of need, newest first in each part, and each part has a share of the 8,000 characters, so the newest items are never cut: turns not yet recorded, the last 5 steps, open asks, rules and corrections, learnings, files, then decisions. A message from a task, a schedule or another session does not use it up. Turns still being recorded are not in the ledger yet, so the digest lists your messages from them first. A ledger with nothing in it gives no digest.
 
 ## Settings
 
