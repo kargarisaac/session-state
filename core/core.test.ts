@@ -1,5 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
+import { applyConsolidation, consolidate, standingRules } from './consolidate'
 import { contextText } from './context'
 import { digestText } from './digest'
 import { checkFileRoles, checkLearnings, checkMemories, isQuoteOf, parseExtraction, systemPrompt, wordCount } from './extract'
@@ -848,6 +849,59 @@ test('topic helpers: index in order with note ids, one section per topic, recent
   expect(topicSection(state, 'PRs')).toBe('## PRs\n- M-001 · requirement · Rule 1. "rule 1" (t1, said 3 times)\n  Why: Because.\n- M-003 · requirement · Rule 3. "rule 3" (t3)\n  Why: Because.')
   const ev = (turn: number, topics: string[]) => ({ type: 'extract' as const, at: 0, turn, turnId: `t${turn}`, model: 'h', mode: 'extract' as const, ms: 0, usage: emptyUsage(), kept: 0, learned: 0, closed: 0, roles: 0, dropped: [], topics })
   expect(recentTopics([ev(1, ['Old']), ev(5, ['A']), ev(6, ['B', 'A'])], 3)).toEqual(['B', 'A'])
+})
+
+test('consolidation records every removed note and keeps merge evidence', () => {
+  const state = applyMemories(fresh(), [
+    memory('Never merge a pull request.', 'Never merge a pull request.', { kind: 'requirement' }),
+    memory('Do not merge pull requests.', 'Do not merge pull requests.', { kind: 'requirement' }),
+    memory('Use SQLite.', 'Use SQLite.'),
+    memory('Use Postgres.', 'Use Postgres.'),
+    memory('Run the tests.', 'Run the tests.', { kind: 'ask' }),
+    memory('Run old checks.', 'Run old checks.', { kind: 'ask' }),
+  ], 1, 'id-1', '', []).state
+  state.notes[1]!.count = 2
+  state.notes[1]!.lastTurn = 7
+  const out = applyConsolidation(state, JSON.stringify({
+    merges: [{ keep: 1, drop: [2] }], replaces: [{ old: 3, new: 4 }], done: [5], dropped: [{ id: 6, reason: 'Abandoned' }],
+    topics: [{ name: 'Work', summary: 'Project rules' }], assign: [{ id: 1, topic: 'Work' }, { id: 4, topic: 'Work' }],
+  }), 8)
+  expect(out.state.notes.map(n => n.id)).toEqual([1, 4])
+  expect(out.state.notes[0]).toMatchObject({ count: 3, lastTurn: 7, quote: 'Never merge a pull request.', topic: 'Work' })
+  expect(out.moved.map(m => [m.item.id, m.reason, m.by, m.note])).toEqual([
+    [2, 'merged', 1, undefined], [3, 'superseded', 4, undefined], [5, 'done', undefined, undefined], [6, 'dropped', undefined, 'Abandoned'],
+  ])
+})
+
+test('consolidation rejects dropping a rule without changing the ledger', async () => {
+  const state = applyMemories(fresh(), [memory('Never merge pull requests.', 'Never merge pull requests.', { kind: 'requirement' })], 1, 'id-1', '', []).state
+  const { host } = fakeHost(1, [json({ merges: [], replaces: [], done: [], dropped: [{ id: 1, reason: 'old' }], topics: [], assign: [] })])
+  const out = await consolidate(host, state, '', [], 0, 1, [])
+  expect(out.state).toEqual(state)
+  expect(out.moved).toEqual([])
+  expect(out.error).toContain('only asks')
+})
+
+test('two ledgers with the same rule yield one standing suggestion', () => {
+  const make = () => applyMemories(fresh(), [memory('Never merge pull requests without user approval.', 'Never merge pull requests without user approval.', { kind: 'requirement' })], 1, 'id-1', '', []).state
+  expect(standingRules(make(), [make(), make()]).map(n => n.text)).toEqual(['Never merge pull requests without user approval.'])
+})
+
+test('consolidation uses only user messages since the last pass', async () => {
+  const state = fresh()
+  const { host, calls } = fakeHost(1, [json({ merges: [], replaces: [], done: [], dropped: [], topics: [], assign: [] })])
+  const archive = [turn('old words', 1), turn('new words', 2), turn('<cross-session-message name="lead">other words</cross-session-message>', 3)].map(t => turnRecord(t, 1000))
+  const out = await consolidate(host, state, '- t2 · ✓ · Worked', archive, 1, 3, [])
+  expect(out.error).toBe(undefined)
+  expect(calls.requests[0]!.effort).toBe('high')
+  expect(calls.requests[0]!.prompt).toContain('new words')
+  expect(calls.requests[0]!.prompt.includes('old words')).toBe(false)
+  expect(calls.requests[0]!.prompt.includes('other words')).toBe(false)
+})
+
+test('opposite rules are not suggested as the same rule', () => {
+  const make = (text: string) => applyMemories(fresh(), [memory(text, text, { kind: 'requirement' })], 1, 'id-1', '', []).state
+  expect(standingRules(make('Never merge pull requests without user approval.'), [make('Always merge pull requests without user approval.')])).toEqual([])
 })
 
 test('a note whose text has double quotes round-trips through the topic layout', async () => {

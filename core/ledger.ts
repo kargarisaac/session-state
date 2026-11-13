@@ -56,6 +56,7 @@ export const summarize = (events: readonly LedgerEvent[]): Stats => {
     if (e.type === 'compaction') { stats.compactions += 1; continue }
     if (e.type === 'digest') { stats.digests += 1; continue }
     if (e.type === 'read') { stats.reads += 1; continue }
+    if (e.type === 'consolidate') continue
     if (e.type === 'gate') {
       stats.turns += 1
       if (e.action === 'skip') stats.skipped += 1
@@ -100,7 +101,7 @@ export const parseLedger = (text: string): LedgerEvent[] =>
     .flatMap((line): LedgerEvent[] => {
       try {
         const e = JSON.parse(line) as LedgerEvent
-        if (e.type === 'gate' || e.type === 'extract' || e.type === 'compaction' || e.type === 'digest' || e.type === 'read') return [e]
+        if (e.type === 'gate' || e.type === 'extract' || e.type === 'compaction' || e.type === 'consolidate' || e.type === 'digest' || e.type === 'read') return [e]
         if (e.type === 'turn') return [{ ...e, facts: isFacts(e.facts) ? { ...emptyFacts(), ...e.facts } : emptyFacts() }]
         return []
       } catch {
