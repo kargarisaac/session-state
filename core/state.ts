@@ -19,7 +19,7 @@ export const learnLabel = (id: number): string => `L-${String(id).padStart(3, '0
 
 const oneLine = (s: string): string => s.replace(/\s+/g, ' ').trim()
 
-export const emptyState = (front: Record<string, string>): State => ({ front: { ...front }, notes: [], learnings: [], roles: {}, own: [] })
+export const emptyState = (front: Record<string, string>): State => ({ front: { ...front }, notes: [], learnings: [], roles: {}, own: [], now: '', topics: {} })
 
 const parseFront = (md: string): { front: Record<string, string>; body: string } => {
   const front: Record<string, string> = {}

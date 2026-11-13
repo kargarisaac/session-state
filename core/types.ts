@@ -21,6 +21,11 @@ export type Note = {
   doneAt?: number
   // The session that sent the message the note came from, when it was not typed by the person.
   via?: string
+  // The topic section of state.md the note sits in ("Unsorted" until a topic is given).
+  topic?: string
+  // How many times the person said it, and the last turn they did.
+  count?: number
+  lastTurn?: number
 }
 
 // Something the agent found out the hard way: an approach that failed, or a hard constraint.
@@ -33,6 +38,7 @@ export type Learning = {
   evidence: string
   status: 'active' | 'superseded'
   supersededBy?: number
+  topic?: string
 }
 
 // The ledger as state.md holds it: only what is true now. `roles` maps a file path to what it is for.
@@ -42,10 +48,14 @@ export type State = {
   learnings: Learning[]
   roles: Record<string, string>
   own: string[]
+  // The Now block: goal, current task, who the chat waits on, open asks. Rewritten every turn.
+  now: string
+  // Topic name to its one-line summary, in index order.
+  topics: Record<string, string>
 }
 
 // An item that left state.md, for history.md.
-export type Moved = { item: Note | Learning; reason: 'superseded' | 'done'; by?: number; turn: number }
+export type Moved = { item: Note | Learning; reason: 'superseded' | 'done' | 'merged' | 'dropped'; by?: number; turn: number; note?: string }
 
 export type Step = {
   turn: number
@@ -93,6 +103,7 @@ export type Memory = {
   quote: string
   refersTo: number[]
   supersedes: number[]
+  topic?: string
 }
 
 export type LearningDraft = { kind: LearnKind; text: string; why: string; evidence: string; replaces: number[] }
