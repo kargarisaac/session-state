@@ -142,6 +142,36 @@ export const noteBlock = (n: Note, tail = ''): string =>
     `Source: ${sourceLine(n)}`,
   ].join('\n')
 
+export const UNSORTED = 'Unsorted'
+export const topicOf = (n: { topic?: string }): string => n.topic?.trim() || UNSORTED
+
+// One line per note: what to act on, the person's words, the last turn and how often they said it, then a one-line Why.
+export const noteLine = (n: Note): string => {
+  const said = (n.count ?? 1) > 1 ? `, said ${n.count} times` : ''
+  const quote = n.quote === '' ? '' : ` ${n.via === undefined ? '' : `${n.via}: `}"${oneLine(n.quote)}"`
+  const why = n.why === '' ? '' : `\n  Why: ${oneLine(n.why)}`
+  return `- ${noteLabel(n.id)} · ${n.kind} · ${oneLine(n.text)}${quote} (t${n.lastTurn ?? n.turn}${said})${why}`
+}
+
+// Topics in index order: the index first, then topics that only active notes name.
+export const topicNames = (state: State): string[] => [
+  ...new Set([...Object.keys(state.topics), ...state.notes.filter(n => n.status === 'active').map(topicOf)]),
+]
+
+// One line per topic: its summary and the ids of its active notes.
+export const topicIndex = (state: State): string =>
+  topicNames(state)
+    .map(t => {
+      const ids = state.notes.filter(n => n.status === 'active' && topicOf(n) === t).map(n => noteLabel(n.id))
+      const summary = state.topics[t] ?? ''
+      return `- ${t}${summary === '' ? '' : `: ${oneLine(summary)}`}${ids.length === 0 ? '' : ` ${ids.join(' ')}`}`
+    })
+    .join('\n')
+
+// A topic's full section: its heading and one line per active note.
+export const topicSection = (state: State, topic: string): string =>
+  [`## ${topic}`, ...state.notes.filter(n => n.status === 'active' && topicOf(n) === topic).map(noteLine)].join('\n')
+
 export const learningBlock = (l: Learning, tail = ''): string =>
   [
     `### ${learnLabel(l.id)} · ${l.kind} · t${l.turn}${tail}`,

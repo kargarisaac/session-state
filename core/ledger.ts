@@ -151,6 +151,13 @@ export const turnRecord = (t: Turn, at: number): TurnRecord => ({
 export const archivedTurns = (events: readonly LedgerEvent[]): TurnRecord[] =>
   events.filter((e): e is TurnRecord => e.type === 'turn')
 
+// The topics the last `turns` recorded turns worked on, newest first.
+export const recentTopics = (events: readonly LedgerEvent[], turns = 3): string[] => {
+  const extracts = events.filter((e): e is ExtractEvent => e.type === 'extract' && (e.topics?.length ?? 0) > 0)
+  const last = extracts.reduce((top, e) => Math.max(top, e.turn), 0)
+  return [...new Set(extracts.filter(e => e.turn > last - turns).reverse().flatMap(e => e.topics ?? []))]
+}
+
 export type { ExtractEvent }
 
 // Turns waiting for Haiku survive a quit: the next start of the session picks them up.

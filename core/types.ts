@@ -177,6 +177,8 @@ export type ExtractEvent = {
   closed: number
   roles: number
   need?: number
+  // The topics the turn worked on.
+  topics?: string[]
   dropped: string[]
   error?: string
 }
